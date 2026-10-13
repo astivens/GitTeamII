@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { AppHeader } from "./components/layout/AppHeader";
 import { EmptyState } from "./components/layout/EmptyState";
 import { KanbanBoard } from "./components/tickets/KanbanBoard";
@@ -10,6 +11,11 @@ import { SetupScreen } from "./components/setup/SetupScreen";
 import { useTicketsStore } from "./store/tickets";
 import { pushToast } from "./lib/toast";
 import type { Ticket } from "./types/ticket";
+
+interface RemoteChangedPayload {
+  sha: string;
+  detected_at: string;
+}
 
 type ModalState =
   | { kind: "closed" }
@@ -33,6 +39,58 @@ function App() {
   useEffect(() => {
     void loadConfig().finally(() => setBootDone(true));
   }, [loadConfig]);
+
+  // Window focus → auto-pull if synced and no pending local changes
+  useEffect(() => {
+    const onFocus = () => {
+      const { syncStatus, pendingCommits, syncNow, flushNow } =
+        useTicketsStore.getState();
+      if (syncStatus !== "synced") return;
+      if (pendingCommits.size > 0) {
+        void flushNow();
+        return;
+      }
+      void syncNow();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Tauri event: background ls-remote worker reports remote HEAD changed
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const fn = await listen<RemoteChangedPayload>(
+          "remote-changed",
+          (event) => {
+            const { syncStatus, pendingCommits, setRemoteSha, syncNow } =
+              useTicketsStore.getState();
+            setRemoteSha(event.payload.sha);
+            if (syncStatus === "synced" && pendingCommits.size === 0) {
+              pushToast(
+                "Cambios remotos detectados — sincronizando…",
+                "default",
+              );
+              void syncNow();
+            }
+          },
+        );
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      } catch {
+        // Not running inside Tauri (e.g. dev) — silently ignore.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   const showEmpty = useMemo(
     () => initialized && !loading && tickets.length === 0,

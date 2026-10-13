@@ -1,7 +1,28 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri";
+import { pushToast } from "../lib/toast";
 import type { CreateTicketInput, Ticket } from "../types/ticket";
 import type { GitConfig, SyncStatus } from "../types/git";
+
+// ----- debounce (module-level so it survives across store actions) -----
+
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingFiles: Set<string> = new Set();
+const DEBOUNCE_MS = 2000;
+
+function clearDebounce(): void {
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  pendingFiles.clear();
+}
+
+function drainPending(): string[] {
+  const files = Array.from(pendingFiles);
+  pendingFiles.clear();
+  return files;
+}
 
 interface TicketsState {
   tickets: Ticket[];
@@ -16,6 +37,8 @@ interface TicketsState {
   syncError: string | null;
   lastSyncedAt: string | null;
   gitConfig: GitConfig | null;
+  remoteSha: string | null;
+  pendingCommits: Set<string>;
 
   initialize: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -35,24 +58,72 @@ interface TicketsState {
   }) => Promise<void>;
   disconnectRepo: () => Promise<void>;
   syncNow: () => Promise<void>;
+  flushNow: () => Promise<void>;
+  startWatcher: () => Promise<void>;
+  stopWatcher: () => Promise<void>;
+  setRemoteSha: (sha: string | null) => void;
 }
 
 export const useTicketsStore = create<TicketsState>((set, get) => {
-  async function commitTicketChange(
+  async function flushPendingCommits(files: string[]): Promise<void> {
+    if (files.length === 0) return;
+    const { gitConfig } = get();
+    if (!gitConfig) {
+      // Config was cleared mid-debounce — drop the pending set silently.
+      return;
+    }
+    set({ syncStatus: "syncing", syncError: null });
+    let successCount = 0;
+    let lastError: string | null = null;
+    for (const file of files) {
+      try {
+        const result = await api.gitCommitTicket(file, "sync", gitConfig);
+        if (result.committed) {
+          successCount += 1;
+        }
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+        // Continue with the rest of the batch
+      }
+    }
+    if (successCount > 0) {
+      set({ lastSyncedAt: new Date().toISOString() });
+    }
+    if (lastError) {
+      set({ syncStatus: "error", syncError: lastError });
+      pushToast(`Sync error: ${lastError}`, "error");
+    } else {
+      set({ syncStatus: "synced", syncError: null });
+      if (successCount > 0) {
+        const label =
+          successCount === 1 ? "Synced 1 ticket" : `Synced ${successCount} tickets`;
+        pushToast(label, "success");
+      }
+    }
+  }
+
+  function commitTicketChange(
     filename: string,
     action: string,
-    config: GitConfig,
-  ): Promise<void> {
-    try {
-      const result = await api.gitCommitTicket(filename, action, config);
-      if (result.committed) {
-        set({ lastSyncedAt: new Date().toISOString() });
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      set({ syncStatus: "error", syncError: msg });
-      // Do NOT throw — the local change is already on disk.
+    _config: GitConfig,
+  ): void {
+    // We don't need `action` anymore — each commit is "sync" and the filename
+    // identifies the ticket. But we keep the signature for clarity at call sites.
+    void _config;
+    void action;
+    pendingFiles.add(filename);
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
     }
+    debounceTimer = setTimeout(() => {
+      const toCommit = drainPending();
+      debounceTimer = null;
+      // Reflect drained set in store state so the UI shows "Syncing…"
+      set({ pendingCommits: new Set() });
+      void flushPendingCommits(toCommit);
+    }, DEBOUNCE_MS);
+    // Mirror the pending set so external listeners (e.g. App.tsx) can read it.
+    set({ pendingCommits: new Set(pendingFiles) });
   }
 
   return {
@@ -67,6 +138,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     syncError: null,
     lastSyncedAt: null,
     gitConfig: null,
+    remoteSha: null,
+    pendingCommits: new Set<string>(),
 
     initialize: async () => {
       set({ loading: true, error: null });
@@ -102,7 +175,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       await get().refresh();
       const { gitConfig } = get();
       if (gitConfig) {
-        await commitTicketChange(ticket.filename, "create", gitConfig);
+        commitTicketChange(ticket.filename, "create", gitConfig);
       }
       return ticket;
     },
@@ -112,7 +185,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       await get().refresh();
       const { gitConfig } = get();
       if (gitConfig) {
-        await commitTicketChange(ticket.filename, "update", gitConfig);
+        commitTicketChange(ticket.filename, "update", gitConfig);
       }
       return ticket;
     },
@@ -122,7 +195,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       await get().refresh();
       const { gitConfig } = get();
       if (gitConfig) {
-        await commitTicketChange(filename, "delete", gitConfig);
+        commitTicketChange(filename, "delete", gitConfig);
       }
     },
 
@@ -141,6 +214,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
             gitConfig: null,
             lastSyncedAt: null,
             syncError: null,
+            remoteSha: null,
           });
           return;
         }
@@ -198,6 +272,17 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           initialized: true,
           loading: false,
         });
+
+        // Start the background ls-remote watcher + seed the last known SHA
+        try {
+          await get().startWatcher();
+          const sha = await api.gitCurrentRemoteSha();
+          if (sha) {
+            set({ remoteSha: sha });
+          }
+        } catch {
+          // Non-fatal — the user can still sync manually
+        }
       } catch (e) {
         set({
           syncStatus: "error",
@@ -230,6 +315,15 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           initialized: true,
           loading: false,
         });
+        try {
+          await get().startWatcher();
+          const sha = await api.gitCurrentRemoteSha();
+          if (sha) {
+            set({ remoteSha: sha });
+          }
+        } catch {
+          // Non-fatal
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         set({ syncStatus: "error", syncError: msg });
@@ -238,6 +332,14 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     },
 
     disconnectRepo: async () => {
+      // Stop the watcher first so it doesn't race with the config deletion
+      try {
+        await get().stopWatcher();
+      } catch {
+        // ignore — best effort
+      }
+      // Cancel any pending debounced commits
+      clearDebounce();
       try {
         await api.gitDeleteConfig();
       } catch {
@@ -248,6 +350,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         gitConfig: null,
         lastSyncedAt: null,
         syncError: null,
+        remoteSha: null,
+        pendingCommits: new Set<string>(),
       });
     },
 
@@ -256,7 +360,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       if (!gitConfig) return;
       set({ syncStatus: "syncing", syncError: null });
       try {
-        await api.gitPull(gitConfig);
+        const pullResult = await api.gitPull(gitConfig);
         const changed = await api.gitListLocalChanges();
         for (const file of changed) {
           await api.gitCommitTicket(file, "sync", gitConfig);
@@ -268,6 +372,13 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           lastSyncedAt: new Date().toISOString(),
           syncError: null,
         });
+        if (pullResult.commits_pulled > 0) {
+          const label =
+            pullResult.commits_pulled === 1
+              ? "Pulled 1 commit"
+              : `Pulled ${pullResult.commits_pulled} commits`;
+          pushToast(label, "success");
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.startsWith("CONFLICT:") || msg.startsWith("REJECTED:")) {
@@ -277,5 +388,42 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         }
       }
     },
+
+    flushNow: async () => {
+      // Cancel the debounce timer (if any) and drain immediately
+      if (debounceTimer !== null) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      const toCommit = drainPending();
+      set({ pendingCommits: new Set() });
+      await flushPendingCommits(toCommit);
+    },
+
+    startWatcher: async () => {
+      try {
+        await api.gitStartWatcher();
+      } catch (e) {
+        eprintln("[store] startWatcher failed", e);
+      }
+    },
+
+    stopWatcher: async () => {
+      try {
+        await api.gitStopWatcher();
+      } catch {
+        // ignore
+      }
+    },
+
+    setRemoteSha: (sha: string | null) => set({ remoteSha: sha }),
   };
 });
+
+// Tiny shim to keep `eprintln`-style logging from the store in one place
+// (mirrors Rust's eprintln for symmetry in dev).
+function eprintln(label: string, value: unknown): void {
+  const msg = value instanceof Error ? value.message : String(value);
+  // eslint-disable-next-line no-console
+  console.error(`[gitteam] ${label}: ${msg}`);
+}

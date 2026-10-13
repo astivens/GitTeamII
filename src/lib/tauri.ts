@@ -93,3 +93,15 @@ export async function gitStatus(): Promise<GitStatus> {
 export async function gitListLocalChanges(): Promise<string[]> {
   return invoke<string[]>("git_list_local_changes");
 }
+
+export async function gitStartWatcher(): Promise<void> {
+  await invoke<void>("git_start_watcher");
+}
+
+export async function gitStopWatcher(): Promise<void> {
+  await invoke<void>("git_stop_watcher");
+}
+
+export async function gitCurrentRemoteSha(): Promise<string | null> {
+  return invoke<string | null>("git_current_remote_sha");
+}

@@ -1,12 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
 use gray_matter::engine::YAML;
 use gray_matter::{Matter, Pod};
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, State};
 use tokio::process::Command;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1126,6 +1129,175 @@ async fn git_list_local_changes() -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+// ----- background watcher (Fase 3) -----
+
+#[derive(Default)]
+pub struct WatcherState {
+    pub task: Mutex<Option<JoinHandle<()>>>,
+    pub last_known_sha: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Serialize, Clone)]
+struct RemoteChangedPayload {
+    sha: String,
+    detected_at: String,
+}
+
+#[tauri::command]
+async fn git_start_watcher(
+    app: AppHandle,
+    state: State<'_, WatcherState>,
+) -> Result<(), String> {
+    {
+        let task_guard = state
+            .task
+            .lock()
+            .map_err(|e| format!("watcher lock failed: {}", e))?;
+        if task_guard.is_some() {
+            return Ok(());
+        }
+    }
+
+    let last_known_sha = Arc::clone(&state.last_known_sha);
+    let app_handle = app.clone();
+
+    let handle = tokio::spawn(async move {
+        let mut is_first_iteration = true;
+        loop {
+            // Check that data dir exists and is a git repo
+            let dir = match data_dir() {
+                Ok(d) => d,
+                Err(_) => {
+                    eprintln!("[gitteam watcher] no data dir, sleeping 30s");
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    continue;
+                }
+            };
+
+            if !dir.join(".git").exists() {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                continue;
+            }
+
+            // Need a saved config
+            let config = match read_git_config() {
+                Ok(Some(c)) => c,
+                _ => {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    continue;
+                }
+            };
+
+            // Need a saved PAT
+            let pat = match load_pat() {
+                Ok(p) => p,
+                Err(_) => {
+                    // No PAT — not an error, just skip this cycle.
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    continue;
+                }
+            };
+
+            let auth_url = with_authenticated_url(&config.repo_url, &pat);
+
+            // `git ls-remote <url> HEAD` with 10s timeout
+            let mut cmd = Command::new("git");
+            cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
+            let result = timeout(Duration::from_secs(10), cmd.output()).await;
+
+            let new_sha: Option<String> = match result {
+                Ok(Ok(output)) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    stdout
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().next())
+                        .map(|s| s.to_string())
+                }
+                Ok(Ok(output)) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!(
+                        "[gitteam watcher] ls-remote failed (exit {}): {}",
+                        output.status,
+                        stderr.trim()
+                    );
+                    None
+                }
+                Ok(Err(e)) => {
+                    eprintln!("[gitteam watcher] ls-remote spawn failed: {}", e);
+                    None
+                }
+                Err(_) => {
+                    eprintln!("[gitteam watcher] ls-remote timed out after 10s");
+                    None
+                }
+            };
+
+            if let Some(sha) = new_sha {
+                if is_first_iteration {
+                    if let Ok(mut last) = last_known_sha.lock() {
+                        *last = Some(sha);
+                    }
+                    is_first_iteration = false;
+                } else {
+                    let should_emit = {
+                        let last = last_known_sha.lock().ok();
+                        match last {
+                            Some(g) => g.as_ref() != Some(&sha),
+                            None => true,
+                        }
+                    };
+                    if should_emit {
+                        if let Ok(mut last) = last_known_sha.lock() {
+                            *last = Some(sha.clone());
+                        }
+                        let payload = RemoteChangedPayload {
+                            sha,
+                            detected_at: now_iso(),
+                        };
+                        if let Err(e) = app_handle.emit("remote-changed", payload) {
+                            eprintln!("[gitteam watcher] emit failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+
+    let mut task_guard = state
+        .task
+        .lock()
+        .map_err(|e| format!("watcher lock failed: {}", e))?;
+    *task_guard = Some(handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn git_stop_watcher(state: State<'_, WatcherState>) -> Result<(), String> {
+    let mut task_guard = state
+        .task
+        .lock()
+        .map_err(|e| format!("watcher lock failed: {}", e))?;
+    if let Some(handle) = task_guard.take() {
+        handle.abort();
+        // Best-effort: do not await — the task will unwind on its next await point.
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn git_current_remote_sha(
+    state: State<'_, WatcherState>,
+) -> Result<Option<String>, String> {
+    let guard = state
+        .last_known_sha
+        .lock()
+        .map_err(|e| format!("watcher lock failed: {}", e))?;
+    Ok(guard.clone())
+}
+
 // ----- runner -----
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1135,6 +1307,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(WatcherState::default())
         .invoke_handler(tauri::generate_handler![
             init_data_dir,
             list_tickets,
@@ -1153,6 +1326,9 @@ pub fn run() {
             git_commit_ticket,
             git_status,
             git_list_local_changes,
+            git_start_watcher,
+            git_stop_watcher,
+            git_current_remote_sha,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
