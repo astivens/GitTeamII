@@ -1129,6 +1129,188 @@ async fn git_list_local_changes() -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+// ----- conflict resolution commands (Fase 4) -----
+
+/// Return the list of unmerged (conflicted) files. An empty list means there are
+/// no conflicts (or we are not in a rebase/merge state).
+#[tauri::command]
+async fn git_list_conflicts() -> Result<Vec<String>, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Ok(vec![]);
+    }
+    let output = run_git(&dir, &["diff", "--name-only", "--diff-filter=U"], 10, None)
+        .await
+        .unwrap_or_default();
+    let files: Vec<String> = output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok(files)
+}
+
+/// Read one side of a conflicted file. `version` is "local" (working tree) or
+/// "remote" (HEAD). Returns an empty string when the file does not exist in
+/// that version (e.g. it was deleted on the other side).
+#[tauri::command]
+async fn git_read_conflict_version(filename: String, version: String) -> Result<String, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository.".to_string());
+    }
+    match version.as_str() {
+        "local" => {
+            let path = dir.join(&filename);
+            if !path.exists() {
+                return Ok(String::new());
+            }
+            fs::read_to_string(&path).map_err(|e| format!("read failed: {}", e))
+        }
+        "remote" => match run_git(&dir, &["show", &format!("HEAD:{}", filename)], 10, None).await {
+            Ok(content) => Ok(content),
+            Err(_) => Ok(String::new()),
+        },
+        other => Err(format!("unknown version '{}', expected 'local' or 'remote'", other)),
+    }
+}
+
+/// Resolve a single conflicted file. `resolution` is "local", "remote" or
+/// "both". For "both", the HEAD version is saved next to the conflicted file
+/// with a `.remote.md` suffix (with collision suffix `-2`, `-3`, ...) and the
+/// conflicted file is resolved with "ours". Returns the new file's name when
+/// one was created, empty string otherwise.
+#[tauri::command]
+async fn git_resolve_conflict(filename: String, resolution: String) -> Result<String, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository.".to_string());
+    }
+
+    match resolution.as_str() {
+        "local" => {
+            run_git(&dir, &["checkout", "--ours", &filename], 10, None).await?;
+            run_git(&dir, &["add", &filename], 10, None).await?;
+            Ok(String::new())
+        }
+        "remote" => {
+            run_git(&dir, &["checkout", "--theirs", &filename], 10, None).await?;
+            run_git(&dir, &["add", &filename], 10, None).await?;
+            Ok(String::new())
+        }
+        "both" => {
+            // Naming convention: `<stem>.remote.md` where `<stem>` is the
+            // conflicted filename without its trailing `.md`. Collisions get
+            // a `-2`, `-3`, ... suffix before the extension (matching the
+            // project's `withCollisionSuffix` pattern).
+            //
+            // Example: `TKT-0001-foo.md` → `TKT-0001-foo.remote.md`,
+            //          next collision       → `TKT-0001-foo.remote-2.md`
+            let stem = filename
+                .strip_suffix(".md")
+                .unwrap_or(filename.as_str());
+            let remote_filename = {
+                let mut candidate = format!("{}.remote.md", stem);
+                let mut i = 2;
+                while dir.join(&candidate).exists() {
+                    candidate = format!("{}.remote-{}.md", stem, i);
+                    i += 1;
+                }
+                candidate
+            };
+
+            // Capture HEAD's version of the conflicted file
+            let remote_content = run_git(
+                &dir,
+                &["show", &format!("HEAD:{}", filename)],
+                10,
+                None,
+            )
+            .await?;
+            let remote_path = dir.join(&remote_filename);
+            fs::write(&remote_path, &remote_content)
+                .map_err(|e| format!("write remote copy failed: {}", e))?;
+
+            // Resolve the conflicted file by keeping our local version
+            run_git(&dir, &["checkout", "--ours", &filename], 10, None).await?;
+            run_git(&dir, &["add", &filename], 10, None).await?;
+            run_git(&dir, &["add", &remote_filename], 10, None).await?;
+            Ok(remote_filename)
+        }
+        other => Err(format!(
+            "unknown resolution '{}', expected 'local', 'remote' or 'both'",
+            other
+        )),
+    }
+}
+
+/// Finish an in-progress rebase or merge after all conflicts are resolved.
+/// Returns the new HEAD SHA. Errors out when not in a rebase/merge state.
+#[tauri::command]
+async fn git_finish_resolution() -> Result<String, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository.".to_string());
+    }
+
+    let config = read_git_config()?.unwrap_or(GitConfig {
+        repo_url: String::new(),
+        git_user_name: String::new(),
+        git_user_email: String::new(),
+        last_sync_at: None,
+    });
+
+    let in_rebase = run_git(&dir, &["rev-parse", "--git-path", "REBASE_HEAD"], 5, None)
+        .await
+        .is_ok();
+    let in_merge = !in_rebase
+        && run_git(&dir, &["rev-parse", "--git-path", "MERGE_HEAD"], 5, None)
+            .await
+            .is_ok();
+
+    if in_rebase {
+        run_git(
+            &dir,
+            &["-c", "core.editor=true", "rebase", "--continue"],
+            30,
+            Some((&config.git_user_name, &config.git_user_email)),
+        )
+        .await?;
+    } else if in_merge {
+        run_git(
+            &dir,
+            &["commit", "--no-edit"],
+            15,
+            Some((&config.git_user_name, &config.git_user_email)),
+        )
+        .await?;
+    } else {
+        return Err("Not in a rebase or merge state".to_string());
+    }
+
+    git_head(&dir).await
+}
+
+/// Abort an in-progress rebase or merge. No-op when not in either state.
+#[tauri::command]
+async fn git_abort_resolution() -> Result<(), String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository.".to_string());
+    }
+    let in_rebase = run_git(&dir, &["rev-parse", "--git-path", "REBASE_HEAD"], 5, None).await;
+    if in_rebase.is_ok() {
+        let _ = run_git(&dir, &["rebase", "--abort"], 15, None).await;
+        return Ok(());
+    }
+    let in_merge = run_git(&dir, &["rev-parse", "--git-path", "MERGE_HEAD"], 5, None).await;
+    if in_merge.is_ok() {
+        let _ = run_git(&dir, &["merge", "--abort"], 15, None).await;
+        return Ok(());
+    }
+    Ok(())
+}
+
 // ----- background watcher (Fase 3) -----
 
 #[derive(Default)]
@@ -1326,6 +1508,11 @@ pub fn run() {
             git_commit_ticket,
             git_status,
             git_list_local_changes,
+            git_list_conflicts,
+            git_read_conflict_version,
+            git_resolve_conflict,
+            git_finish_resolution,
+            git_abort_resolution,
             git_start_watcher,
             git_stop_watcher,
             git_current_remote_sha,

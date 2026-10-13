@@ -7,9 +7,11 @@ interface ModalProps {
   title: string;
   children: ReactNode;
   footer?: ReactNode;
+  /** Wider layout for modals that need a side-by-side preview. */
+  wide?: boolean;
 }
 
-export function Modal({ open, onClose, title, children, footer }: ModalProps) {
+export function Modal({ open, onClose, title, children, footer, wide }: ModalProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -23,6 +25,8 @@ export function Modal({ open, onClose, title, children, footer }: ModalProps) {
 
   if (!open) return null;
 
+  const widthClass = wide ? "max-w-[1100px]" : "max-w-[720px]";
+
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
@@ -30,7 +34,9 @@ export function Modal({ open, onClose, title, children, footer }: ModalProps) {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="card w-full max-w-[720px] max-h-[80vh] flex flex-col overflow-hidden shadow-elevated">
+      <div
+        className={`card w-full ${widthClass} max-h-[85vh] flex flex-col overflow-hidden shadow-elevated`}
+      >
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <h2 className="text-base font-semibold text-fg">{title}</h2>
           <button

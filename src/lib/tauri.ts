@@ -94,6 +94,32 @@ export async function gitListLocalChanges(): Promise<string[]> {
   return invoke<string[]>("git_list_local_changes");
 }
 
+export async function gitListConflicts(): Promise<string[]> {
+  return invoke<string[]>("git_list_conflicts");
+}
+
+export async function gitReadConflictVersion(
+  filename: string,
+  version: "local" | "remote",
+): Promise<string> {
+  return invoke<string>("git_read_conflict_version", { filename, version });
+}
+
+export async function gitResolveConflict(
+  filename: string,
+  resolution: "local" | "remote" | "both",
+): Promise<string> {
+  return invoke<string>("git_resolve_conflict", { filename, resolution });
+}
+
+export async function gitFinishResolution(): Promise<string> {
+  return invoke<string>("git_finish_resolution");
+}
+
+export async function gitAbortResolution(): Promise<void> {
+  await invoke<void>("git_abort_resolution");
+}
+
 export async function gitStartWatcher(): Promise<void> {
   await invoke<void>("git_start_watcher");
 }

@@ -160,3 +160,55 @@ Ver `todowrite` activo. Fases 1.0 → 1.5 son el MVP local sin Git (puede usarse
 - Fase 2.1: evaluar `tauri-plugin-git` vs spawn a `git` CLI
 - Fase 3.2: considerar `sonner` para toasts (más bonito que `react-hot-toast`)
 - Fase 4.0: la resolución de conflictos puede ser tonta (mostrar diff y dejar elegir) — no necesitamos un merge editor de 3 paneles
+
+### Fase 3 — Sync invisible (background ls-remote + debounce + onFocus) ✅ done (2026-10-13)
+
+Implementado:
+- Worker `git ls-remote` cada 15s en Tokio, emite evento `remote-changed` cuando cambia el SHA de HEAD remoto
+- Auto-push con debounce de 2s en el store: cada commit de ticket se acumula y se flushea junto
+- Auto-pull onFocus: si está synced y no hay commits pendientes, hace `gitPull` automáticamente
+- Header `AppHeader` muestra indicador de sync (synced/syncing/error/conflict)
+- `syncNow` (botón manual) → pull + commit+push de archivos locales + refresh de tickets
+- Manejo de errores: REJECTED (push no-fast-forward) y CONFLICT (pull con conflictos) → `syncStatus = 'conflict'`
+- Watcher inicia/para junto con el ciclo de vida del repo conectado
+
+Notas:
+- En este proyecto NO se hace cross-compile. Cada plataforma se construye en su propio OS (ver Build en Fase 4).
+
+### Fase 4 — Conflict resolution UI + build docs ✅ done (2026-10-13)
+
+Implementado:
+- 5 nuevos Tauri commands: `git_list_conflicts`, `git_read_conflict_version`, `git_resolve_conflict`, `git_finish_resolution`, `git_abort_resolution`
+- Strategy per-file: `git checkout --ours/--theirs <file>` + `git add <file>`. "Both" guarda el HEAD como `<file>.remote.md` con collision suffix (-2, -3 ...)
+- Store actions: `loadConflicts`, `resolveConflict`, `finishResolution`, `abortResolution`. Auto-finaliza cuando `conflicts.length === 0`
+- `syncNow` ahora dispara `loadConflicts()` cuando entra a estado conflict
+- UI: `ConflictBanner` (top bar) + `ConflictModal` (lista + vista side-by-side con `react-markdown`)
+- Modal usa `Modal` con prop `wide` (max-w 1100px en lugar de 720) para acomodar el preview
+- Scripts de build cross-platform documentados (no cross-compile real — el usuario compila en cada OS)
+
+### Build
+
+GitTeam NO cross-compila. El binario debe producirse en el sistema operativo destino porque cada plataforma necesita sus propias native dependencies (webkit2gtk en Linux, WebKit en macOS, WebView2 en Windows). Ver docs oficiales de Tauri: <https://v2.tauri.app/start/prerequisites/>.
+
+Scripts disponibles (definidos en `package.json`):
+
+- `pnpm build:linux` — produce un `.AppImage` portable en `src-tauri/target/release/bundle/appimage/`. **Este dev usa Arch como primary**, así que este es el script que corre normalmente. Requiere `webkit2gtk-4.1`, `libayatana-appindicator3`, `librsvg2`, `openssl` y `gcc` instalados (ver Tauri prerequisites para la lista exacta).
+- `pnpm build:macos` — produce un `.app` y un `.dmg` en `src-tauri/target/release/bundle/macos/`. **Debe correrse en macOS** (requiere Xcode CLI tools). Para ARM (M1/M2/M3) usa `--target aarch64-apple-darwin`; para Intel usa `--target x86_64-apple-darwin`. Para universal binary: `--target universal-apple-darwin`.
+- `pnpm build:windows` — produce instaladores NSIS (`.exe`) y MSI en `src-tauri/target/release/bundle/nsis/` y `bundle/msi/`. **Debe correrse en Windows** (requiere WebView2 runtime y Visual Studio Build Tools con workload C++).
+- `pnpm build:dev` — `tauri build --debug`: build rápido sin bundling, útil para iterar cuando solo se quiere probar el binario. Output en `src-tauri/target/debug/`.
+
+El `.AppImage` es portable — corre en cualquier Linux moderno sin instalación, solo necesita permisos de ejecución (`chmod +x file.AppImage`).
+
+Workflow típico en Linux (este dev):
+1. `pnpm install` (si no se corrió)
+2. `pnpm build:linux`
+3. Output → `src-tauri/target/release/bundle/appimage/GitTeam_0.1.0_amd64.AppImage`
+4. Mover el `.AppImage` a donde se quiera (USB, release, etc.)
+
+Para testing local sin empaquetar:
+- `pnpm tauri dev` — dev server con HMR
+- `pnpm build:dev` — binario debug standalone sin instalador
+
+Notes:
+- El script `build` (frontend only: `tsc && vite build`) sigue existiendo y es independiente de los scripts de build de Tauri.
+- Los builds de Tauri son lentos en frío (1-2 min para incremental, 5-10 min para release limpio). El usuario debe correrlos — el orchestrator no compila binarios.

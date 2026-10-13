@@ -6,6 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:dev": "tauri build --debug",
+    "build:linux": "tauri build --bundles appimage",
+    "build:macos": "tauri build --bundles app,dmg",
+    "build:windows": "tauri build --bundles nsis,msi",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -16,7 +20,9 @@
     "@tauri-apps/plugin-fs": "~2.7.0",
     "@tauri-apps/plugin-opener": "^2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

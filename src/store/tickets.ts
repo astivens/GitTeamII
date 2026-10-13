@@ -39,6 +39,7 @@ interface TicketsState {
   gitConfig: GitConfig | null;
   remoteSha: string | null;
   pendingCommits: Set<string>;
+  conflicts: string[];
 
   initialize: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -62,6 +63,15 @@ interface TicketsState {
   startWatcher: () => Promise<void>;
   stopWatcher: () => Promise<void>;
   setRemoteSha: (sha: string | null) => void;
+
+  // Conflict resolution actions (Fase 4)
+  loadConflicts: () => Promise<void>;
+  resolveConflict: (
+    filename: string,
+    resolution: "local" | "remote" | "both",
+  ) => Promise<void>;
+  finishResolution: () => Promise<void>;
+  abortResolution: () => Promise<void>;
 }
 
 export const useTicketsStore = create<TicketsState>((set, get) => {
@@ -140,6 +150,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     gitConfig: null,
     remoteSha: null,
     pendingCommits: new Set<string>(),
+    conflicts: [],
 
     initialize: async () => {
       set({ loading: true, error: null });
@@ -352,6 +363,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         syncError: null,
         remoteSha: null,
         pendingCommits: new Set<string>(),
+        conflicts: [],
       });
     },
 
@@ -371,6 +383,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           syncStatus: "synced",
           lastSyncedAt: new Date().toISOString(),
           syncError: null,
+          conflicts: [],
         });
         if (pullResult.commits_pulled > 0) {
           const label =
@@ -383,6 +396,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.startsWith("CONFLICT:") || msg.startsWith("REJECTED:")) {
           set({ syncStatus: "conflict", syncError: msg });
+          // Populate the conflicts list so the UI can show what to resolve.
+          void get().loadConflicts();
         } else {
           set({ syncStatus: "error", syncError: msg });
         }
@@ -417,6 +432,81 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     },
 
     setRemoteSha: (sha: string | null) => set({ remoteSha: sha }),
+
+    loadConflicts: async () => {
+      try {
+        const list = await api.gitListConflicts();
+        set({ conflicts: list });
+      } catch (e) {
+        // Non-fatal — keep the previous list and surface via toast
+        pushToast(
+          `Could not load conflicts: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+      }
+    },
+
+    resolveConflict: async (filename, resolution) => {
+      try {
+        const newFile = await api.gitResolveConflict(filename, resolution);
+        if (newFile) {
+          pushToast(`Remote version saved as ${newFile}`, "success");
+        }
+        // Refresh tickets so the new file (if any) shows up, then reload the
+        // conflicts list to see what's still unresolved.
+        await get().refresh();
+        const list = await api.gitListConflicts();
+        set({ conflicts: list });
+        if (list.length === 0) {
+          // Nothing left to resolve — finish the rebase/merge automatically.
+          await get().finishResolution();
+        }
+      } catch (e) {
+        pushToast(
+          `Could not resolve conflict: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+        throw e;
+      }
+    },
+
+    finishResolution: async () => {
+      try {
+        await api.gitFinishResolution();
+        await get().refresh();
+        set({
+          syncStatus: "synced",
+          syncError: null,
+          conflicts: [],
+          lastSyncedAt: new Date().toISOString(),
+        });
+        pushToast("Conflicts resolved", "success");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        set({ syncStatus: "error", syncError: msg });
+        pushToast(`Could not finish resolution: ${msg}`, "error");
+        throw e;
+      }
+    },
+
+    abortResolution: async () => {
+      try {
+        await api.gitAbortResolution();
+      } catch (e) {
+        pushToast(
+          `Could not abort: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+        return;
+      }
+      await get().refresh();
+      set({
+        syncStatus: "synced",
+        syncError: null,
+        conflicts: [],
+      });
+      pushToast("Resolution aborted", "default");
+    },
   };
 });
 

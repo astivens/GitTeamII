@@ -8,6 +8,8 @@ import { TicketModal } from "./components/tickets/TicketModal";
 import { Button } from "./components/ui/Button";
 import { ToastHost } from "./components/ui/ToastHost";
 import { SetupScreen } from "./components/setup/SetupScreen";
+import { ConflictBanner } from "./components/conflicts/ConflictBanner";
+import { ConflictModal } from "./components/conflicts/ConflictModal";
 import { useTicketsStore } from "./store/tickets";
 import { pushToast } from "./lib/toast";
 import type { Ticket } from "./types/ticket";
@@ -34,6 +36,7 @@ function App() {
   const syncError = useTicketsStore((s) => s.syncError);
 
   const [modal, setModal] = useState<ModalState>({ kind: "closed" });
+  const [conflictModalOpen, setConflictModalOpen] = useState(false);
   const [bootDone, setBootDone] = useState(false);
 
   useEffect(() => {
@@ -136,6 +139,10 @@ function App() {
         </div>
       ) : null}
 
+      {syncStatus === "conflict" ? (
+        <ConflictBanner onResolve={() => setConflictModalOpen(true)} />
+      ) : null}
+
       <main className="flex-1 min-h-0 overflow-hidden">
         {!bootDone || (loading && !initialized) ? (
           <div className="h-full w-full flex items-center justify-center">
@@ -183,6 +190,11 @@ function App() {
         onDelete={
           modal.kind === "edit" ? () => void onDelete(modal.ticket) : null
         }
+      />
+
+      <ConflictModal
+        open={conflictModalOpen}
+        onClose={() => setConflictModalOpen(false)}
       />
 
       <ToastHost />
