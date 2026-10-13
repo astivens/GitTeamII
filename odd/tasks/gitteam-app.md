@@ -98,12 +98,52 @@ Vamos a evaluar en Fase 2.1. Si `git2-rs` da problemas con la autenticación HTT
 
 ## Acceptance Criteria (Fase 1)
 
-- [ ] `pnpm tauri dev` levanta la app
-- [ ] Crear un ticket desde la UI genera un `.md` válido en el data folder
-- [ ] Editar y guardar actualiza el archivo en disco
-- [ ] El frontmatter se parsea a objeto TS y se vuelve a serializar sin perder campos
-- [ ] "Copiar para IA" copia el markdown crudo al portapapeles
-- [ ] La UI se ve limpia estilo Trello/Linear (dark mode primero)
+- [x] `pnpm tauri dev` levanta la app ✅
+- [x] Crear un ticket desde la UI genera un `.md` válido en el data folder ✅
+- [x] Editar y guardar actualiza el archivo en disco ✅
+- [x] El frontmatter se parsea a objeto TS y se vuelve a serializar sin perder campos ✅
+- [x] "Copiar para IA" copia el markdown crudo al portapapeles ✅
+- [x] La UI se ve limpia estilo Trello/Linear (dark mode primero) ✅
+
+## Progress
+
+### Fase 1 — Local MVP ✅ done (2026-10-13)
+
+Commits:
+- `chore: scaffold tauri 2 + react 19 + ts + vite + tailwind`
+- `feat(core): markdown ticket backend and store`
+- `feat(ui): kanban board, ticket cards, modal, copy-for-IA`
+- `feat(ui): add toast event bus`
+
+Verificación:
+- `pnpm exec tsc --noEmit` → pass
+- `pnpm exec vite build` → 238KB JS / 14KB CSS, 472ms
+- `cargo check` (src-tauri) → pass
+- `cargo build` (src-tauri, full) → pass, 1m 26s
+- `pnpm tauri dev` → arrancó, creó `~/.gitteam-data/tickets/`, mató limpio
+
+Implementado:
+- 6 Tauri commands (init/list/read/create/update/delete) sobre `~/.gitteam-data/tickets/`
+- Frontmatter YAML roundtrip via `gray_matter`, atomic write (tmp+rename)
+- Filename: `{id}-{slug}.md` con collision suffix; ID autoincremental desde max(N)+1 (base 1000)
+- Zustand store con optimistic state y refresh post-mutation
+- Kanban 4-columnas (Backlog, In Progress, Review, Done; Archived en filtro)
+- Modal crear/editar/borrar con validación (title required)
+- "Copiar para IA" → raw markdown al portapapeles vía `tauri-plugin-clipboard-manager`
+- Toast bus (pub/sub minimal), dark Linear-style
+- Toasts, empty state, loading spinner, error retry
+
+Notas:
+- `gray_matter` crate usa underscore en Rust, no `gray-matter` (corrección del writer)
+- I/O de archivos en Rust (sin scope de fs en capabilities — más seguro)
+- El writer notó un bug del scaffold: `main.rs` referenciaba `tmpgitteam_scaffold_lib` → arreglado a `gitteam_lib`
+
+### Fase 2 — Git sync ⏳ pending
+
+Decisiones a tomar antes de empezar:
+- PAT storage: `tauri-plugin-stronghold` (cifrado, sandbox) vs `keyring` crate (OS keyring nativo) vs config JSON plano (simple pero menos seguro)
+- Git impl: spawn a `git` CLI (predecible, maneja credenciales nativo) vs `git2-rs` (libgit2, sin subprocess pero más frágil con HTTPS+PAT)
+- Setup flow: full-screen en primer launch vs modal sobre board vacío vs CLI flag
 
 ## Tareas (referencian los todos)
 
