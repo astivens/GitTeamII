@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    tmpgitteam_scaffold_lib::run()
+    gitteam_lib::run()
 }
