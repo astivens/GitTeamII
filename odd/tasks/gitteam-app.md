@@ -155,6 +155,28 @@ Tareas:
 
 Ver `todowrite` activo. Fases 1.0 → 1.5 son el MVP local sin Git (puede usarse de forma "offline first"). Fases 2+ agregan sincronización.
 
+## Build (Fase 4)
+
+- **Linux (este dev, primary)**: `pnpm build:linux` → `.AppImage` en `src-tauri/target/release/bundle/appimage/`. Portable, corre en cualquier Linux moderno.
+- **macOS**: `pnpm build:macos` (correr en macOS). Produce `.app` y `.dmg`.
+- **Windows**: `pnpm build:windows` (correr en Windows o con cross-toolchain). Produce instaladores NSIS y MSI.
+- **Dev build rápido (sin bundle)**: `pnpm build:dev`.
+
+Cada plataforma necesita sus dependencias nativas (webkit2gtk-4.1 en Linux, etc.). Ver docs de Tauri.
+
+## Estado final
+
+Las 4 fases del plan original están completas:
+
+| Fase | Descripción | Commits |
+|------|-------------|---------|
+| 1 | Local MVP (CRUD sobre .md, UI Kanban, Copiar para IA) | `0487b91`, `3032d56`, `0359708` |
+| 2 | Git sync (keyring PAT, setup, state machine, auto-commit) | `f60b546`, `d175665` |
+| 3 | Aceleración (ls-remote worker, debounce, auto-pull onFocus) | `efac519` |
+| 4 | Conflict resolution UI + build scripts | `a33435b` |
+
+Total: 11 commits de trabajo + 1 docs. 25 Tauri commands, ~1900 líneas Rust, ~1500 líneas TS/TSX.
+
 ## Notas para el futuro
 
 - Fase 2.1: evaluar `tauri-plugin-git` vs spawn a `git` CLI
