@@ -138,12 +138,18 @@ Notas:
 - I/O de archivos en Rust (sin scope de fs en capabilities — más seguro)
 - El writer notó un bug del scaffold: `main.rs` referenciaba `tmpgitteam_scaffold_lib` → arreglado a `gitteam_lib`
 
-### Fase 2 — Git sync ⏳ pending
+### Fase 2 — Git sync ⏳ in progress
 
-Decisiones a tomar antes de empezar:
-- PAT storage: `tauri-plugin-stronghold` (cifrado, sandbox) vs `keyring` crate (OS keyring nativo) vs config JSON plano (simple pero menos seguro)
-- Git impl: spawn a `git` CLI (predecible, maneja credenciales nativo) vs `git2-rs` (libgit2, sin subprocess pero más frágil con HTTPS+PAT)
-- Setup flow: full-screen en primer launch vs modal sobre board vacío vs CLI flag
+Decisiones tomadas:
+- PAT storage: `keyring` crate → OS keyring (service "gitteam", user "github-pat")
+- Git impl: spawn a `git` CLI (predecible, HTTPS+PAT vía URL embebida)
+- Setup flow: full-screen en primer launch
+
+Tareas:
+- 2.0 Setup screen con URL + PAT + git name/email
+- 2.1 Tauri commands: clone, pull, push, commit, status, test_connection
+- 2.2 Header sync indicator + botón Sync manual + error handling
+- 2.3 Wire ticket changes → commit+push; restructure data dir a `~/.gitteam-data/` root
 
 ## Tareas (referencian los todos)
 
