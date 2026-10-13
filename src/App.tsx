@@ -1,50 +1,101 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useEffect, useMemo, useState } from "react";
+import { Loader2, RefreshCw } from "lucide-react";
+import { AppHeader } from "./components/layout/AppHeader";
+import { EmptyState } from "./components/layout/EmptyState";
+import { KanbanBoard } from "./components/tickets/KanbanBoard";
+import { TicketModal } from "./components/tickets/TicketModal";
+import { Button } from "./components/ui/Button";
+import { ToastHost } from "./components/ui/ToastHost";
+import { useTicketsStore } from "./store/tickets";
+import { pushToast } from "./lib/toast";
+import type { Ticket } from "./types/ticket";
+
+type ModalState =
+  | { kind: "closed" }
+  | { kind: "create" }
+  | { kind: "edit"; ticket: Ticket };
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const initialized = useTicketsStore((s) => s.initialized);
+  const loading = useTicketsStore((s) => s.loading);
+  const error = useTicketsStore((s) => s.error);
+  const tickets = useTicketsStore((s) => s.tickets);
+  const initialize = useTicketsStore((s) => s.initialize);
+  const remove = useTicketsStore((s) => s.remove);
+  const dataDir = useTicketsStore((s) => s.dataDir);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  const [modal, setModal] = useState<ModalState>({ kind: "closed" });
+
+  useEffect(() => {
+    void initialize();
+  }, [initialize]);
+
+  const showEmpty = useMemo(
+    () => initialized && !loading && tickets.length === 0,
+    [initialized, loading, tickets],
+  );
+
+  const onNew = () => setModal({ kind: "create" });
+  const onSelect = (t: Ticket) => setModal({ kind: "edit", ticket: t });
+  const onClose = () => setModal({ kind: "closed" });
+
+  const onDelete = async (t: Ticket) => {
+    const ok = window.confirm(`Delete ${t.id}? This cannot be undone.`);
+    if (!ok) return;
+    try {
+      await remove(t.filename);
+      pushToast("Ticket deleted", "success");
+      onClose();
+    } catch (e) {
+      pushToast(
+        `Error deleting: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    }
+  };
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <div className="h-full flex flex-col bg-bg text-fg">
+      <AppHeader onNewTicket={onNew} />
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      {dataDir ? (
+        <div className="px-4 py-1.5 text-xs text-fg-subtle font-mono border-b border-border bg-bg">
+          {dataDir}
+        </div>
+      ) : null}
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+      <main className="flex-1 min-h-0 overflow-hidden">
+        {loading && !initialized ? (
+          <div className="h-full w-full flex items-center justify-center">
+            <Loader2 size={24} className="animate-spin text-fg-muted" />
+          </div>
+        ) : error && !initialized ? (
+          <div className="h-full w-full flex flex-col items-center justify-center gap-3">
+            <p className="text-fg-muted">Failed to initialize: {error}</p>
+            <Button variant="primary" onClick={() => void initialize()}>
+              <RefreshCw size={14} />
+              Retry
+            </Button>
+          </div>
+        ) : showEmpty ? (
+          <EmptyState onCreate={onNew} />
+        ) : (
+          <KanbanBoard tickets={tickets} onSelect={onSelect} />
+        )}
+      </main>
+
+      <TicketModal
+        open={modal.kind !== "closed"}
+        mode={modal.kind === "create" ? "create" : "edit"}
+        ticket={modal.kind === "edit" ? modal.ticket : null}
+        onClose={onClose}
+        onDelete={
+          modal.kind === "edit" ? () => void onDelete(modal.ticket) : null
+        }
+      />
+
+      <ToastHost />
+    </div>
   );
 }
 
