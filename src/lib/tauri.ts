@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CreateTicketInput, Ticket } from "../types/ticket";
+import type {
+  CommitResult,
+  GitConfig,
+  GitStatus,
+  PullResult,
+  PushResult,
+  SetupResult,
+  TestConnectionResult,
+} from "../types/git";
 
 export async function initDataDir(): Promise<string> {
   return invoke<string>("init_data_dir");
@@ -26,4 +35,61 @@ export async function updateTicket(
 
 export async function deleteTicket(filename: string): Promise<void> {
   await invoke<void>("delete_ticket", { filename });
+}
+
+export async function gitGetConfig(): Promise<GitConfig | null> {
+  return invoke<GitConfig | null>("git_get_config");
+}
+
+export async function gitSaveConfig(
+  config: GitConfig,
+  pat: string,
+): Promise<void> {
+  await invoke<void>("git_save_config", { config, pat });
+}
+
+export async function gitDeleteConfig(): Promise<void> {
+  await invoke<void>("git_delete_config");
+}
+
+export async function gitLoadPat(): Promise<string> {
+  return invoke<string>("git_load_pat");
+}
+
+export async function gitTestConnection(
+  url: string,
+  pat: string,
+): Promise<TestConnectionResult> {
+  return invoke<TestConnectionResult>("git_test_connection", { url, pat });
+}
+
+export async function gitSetupRepo(
+  config: GitConfig,
+  pat: string,
+): Promise<SetupResult> {
+  return invoke<SetupResult>("git_setup_repo", { config, pat });
+}
+
+export async function gitPull(config: GitConfig): Promise<PullResult> {
+  return invoke<PullResult>("git_pull", { config });
+}
+
+export async function gitPush(config: GitConfig): Promise<PushResult> {
+  return invoke<PushResult>("git_push", { config });
+}
+
+export async function gitCommitTicket(
+  filename: string,
+  action: string,
+  config: GitConfig,
+): Promise<CommitResult> {
+  return invoke<CommitResult>("git_commit_ticket", { filename, action, config });
+}
+
+export async function gitStatus(): Promise<GitStatus> {
+  return invoke<GitStatus>("git_status");
+}
+
+export async function gitListLocalChanges(): Promise<string[]> {
+  return invoke<string[]>("git_list_local_changes");
 }
