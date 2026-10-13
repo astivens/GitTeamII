@@ -29,6 +29,8 @@ serde_yaml = "0.9"
 gray_matter = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
+keyring = { version = "3", features = ["linux-native", "apple-native", "windows-native"] }
+tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-thread", "time"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

@@ -1,10 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::Utc;
 use gray_matter::engine::YAML;
 use gray_matter::{Matter, Pod};
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
+use tokio::time::timeout;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Ticket {
@@ -35,16 +38,264 @@ pub struct CreateTicketInput {
     pub body: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GitConfig {
+    pub repo_url: String,
+    pub git_user_name: String,
+    pub git_user_email: String,
+    #[serde(default)]
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct TestConnectionResult {
+    pub ok: bool,
+    pub head_sha: Option<String>,
+    pub repo_name: String,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct SetupResult {
+    pub config: GitConfig,
+    pub head_sha: String,
+    pub files_count: u32,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PullResult {
+    pub head_sha: String,
+    pub files_changed: Vec<String>,
+    pub commits_pulled: u32,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PushResult {
+    pub head_sha: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct CommitResult {
+    pub committed: bool,
+    pub head_sha: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct GitStatus {
+    pub current_sha: String,
+    pub current_branch: String,
+    pub unpushed_count: u32,
+    pub uncommitted_count: u32,
+    pub is_clean: bool,
+}
+
+// ----- data dir -----
+
 fn data_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
-    Ok(home.join(".gitteam-data").join("tickets"))
+    Ok(home.join(".gitteam-data"))
 }
 
 fn ensure_data_dir() -> Result<PathBuf, String> {
     let dir = data_dir()?;
     fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    let legacy = dir.join("tickets");
+    if legacy.exists() && !dir.join(".git").exists() {
+        eprintln!(
+            "[gitteam] note: legacy ticket directory found at {} — Fase 2 ignores it. \
+             Move .md files into {} if you want to keep them.",
+            legacy.display(),
+            dir.display()
+        );
+    }
     Ok(dir)
 }
+
+fn config_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
+    Ok(home.join(".gitteam-config.json"))
+}
+
+// ----- keyring -----
+
+fn keyring_err(e: keyring::Error) -> String {
+    match e {
+        keyring::Error::NoEntry => {
+            "No saved credentials. Please set up the repository again.".to_string()
+        }
+        keyring::Error::PlatformFailure(_)
+        | keyring::Error::NoStorageAccess(_)
+        | keyring::Error::Ambiguous(_) => "Could not access the system keyring. On Linux, make sure you have gnome-keyring or kwallet running.".to_string(),
+        other => format!("Keyring error: {}", other),
+    }
+}
+
+fn save_pat(pat: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new("gitteam", "github-pat").map_err(keyring_err)?;
+    entry.set_password(pat).map_err(keyring_err)
+}
+
+fn load_pat() -> Result<String, String> {
+    let entry = keyring::Entry::new("gitteam", "github-pat").map_err(keyring_err)?;
+    entry.get_password().map_err(keyring_err)
+}
+
+fn delete_pat() -> Result<(), String> {
+    let entry = keyring::Entry::new("gitteam", "github-pat").map_err(keyring_err)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(keyring_err(e)),
+    }
+}
+
+// ----- git config file -----
+
+fn read_git_config() -> Result<Option<GitConfig>, String> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("read config failed: {}", e))?;
+    let config: GitConfig =
+        serde_json::from_str(&content).map_err(|e| format!("parse config failed: {}", e))?;
+    Ok(Some(config))
+}
+
+fn write_git_config(config: &GitConfig) -> Result<(), String> {
+    let path = config_path()?;
+    let content = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("serialize config failed: {}", e))?;
+    fs::write(&path, content).map_err(|e| format!("write config failed: {}", e))?;
+    Ok(())
+}
+
+// ----- url helpers -----
+
+fn with_authenticated_url(url: &str, pat: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    let (host_with_userinfo, path) = match without_scheme.find('/') {
+        Some(i) => (&without_scheme[..i], &without_scheme[i..]),
+        None => (without_scheme, ""),
+    };
+
+    let host = host_with_userinfo
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(host_with_userinfo);
+
+    let host_lower = host.to_ascii_lowercase();
+
+    if host_lower.contains("github") {
+        format!("https://x-access-token:{}@{}{}", pat, host, path)
+    } else if host_lower.contains("gitlab") {
+        format!("https://oauth2:{}@{}{}", pat, host, path)
+    } else {
+        format!("https://{}@{}{}", pat, host, path)
+    }
+}
+
+fn strip_userinfo(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let (scheme, rest) = url.split_at(scheme_end + 3);
+        if let Some(at_idx) = rest.find('@') {
+            return format!("{}{}", scheme, &rest[at_idx + 1..]);
+        }
+    }
+    url.to_string()
+}
+
+fn extract_repo_name(url: &str) -> String {
+    let stripped = url.trim_end_matches('/').trim_end_matches(".git");
+    let without_scheme = stripped
+        .strip_prefix("https://")
+        .or_else(|| stripped.strip_prefix("http://"))
+        .or_else(|| stripped.strip_prefix("ssh://"))
+        .or_else(|| stripped.strip_prefix("git@"))
+        .unwrap_or(stripped);
+    let after_colon = without_scheme
+        .rsplit_once(':')
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_scheme);
+    after_colon
+        .rsplit('/')
+        .next()
+        .unwrap_or(after_colon)
+        .trim()
+        .to_string()
+}
+
+// ----- git command helpers -----
+
+fn build_git_cmd(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    cmd
+}
+
+fn build_git_cmd_with_user(dir: &Path, user_name: &str, user_email: &str) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    cmd.arg("-c").arg(format!("user.name={}", user_name));
+    cmd.arg("-c").arg(format!("user.email={}", user_email));
+    cmd
+}
+
+async fn run_git(
+    dir: &Path,
+    args: &[&str],
+    timeout_secs: u64,
+    with_user: Option<(&str, &str)>,
+) -> Result<String, String> {
+    let mut cmd = match with_user {
+        Some((n, e)) => build_git_cmd_with_user(dir, n, e),
+        None => build_git_cmd(dir),
+    };
+    for a in args {
+        cmd.arg(a);
+    }
+    let fut = cmd.output();
+    let output = timeout(Duration::from_secs(timeout_secs), fut)
+        .await
+        .map_err(|_| format!("git {} timed out after {}s", args.join(" "), timeout_secs))?
+        .map_err(|e| format!("git spawn failed: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed (exit {}): {}",
+            args.join(" "),
+            output.status,
+            stderr.trim()
+        ));
+    }
+    Ok(stdout)
+}
+
+async fn git_head(dir: &Path) -> Result<String, String> {
+    let out = run_git(dir, &["rev-parse", "HEAD"], 10, None).await?;
+    Ok(out.trim().to_string())
+}
+
+fn extract_ticket_id(filename: &str) -> String {
+    if let Some(rest) = filename.strip_prefix("TKT-") {
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        format!("TKT-{}", &rest[..end])
+    } else {
+        filename.to_string()
+    }
+}
+
+// ----- ticket file helpers -----
 
 fn slugify(title: &str) -> String {
     let mut out = String::new();
@@ -96,6 +347,9 @@ fn parse_existing_ids(dir: &Path) -> Vec<u64> {
     let mut ids = vec![];
     for entry in entries.flatten() {
         let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
@@ -239,7 +493,7 @@ fn list_taken_filenames(dir: &Path) -> Vec<String> {
                 .flatten()
                 .filter_map(|e| {
                     let p = e.path();
-                    if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                    if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("md") {
                         p.file_name()
                             .and_then(|n| n.to_str())
                             .map(|s| s.to_string())
@@ -267,6 +521,8 @@ fn sort_tickets_desc(tickets: &mut [Ticket]) {
     tickets.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
 }
 
+// ----- ticket commands (Fase 1) -----
+
 #[tauri::command]
 fn init_data_dir() -> Result<String, String> {
     let dir = ensure_data_dir()?;
@@ -280,16 +536,24 @@ fn list_tickets() -> Result<Vec<Ticket>, String> {
     let mut tickets = vec![];
     for entry in entries.flatten() {
         let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
         match parse_ticket_file(&path) {
-            Ok(t) => tickets.push(t),
-            Err(e) => eprintln!(
-                "[gitteam] skipping malformed ticket {}: {}",
-                path.display(),
-                e
-            ),
+            Ok(t) => {
+                if t.id.starts_with("TKT-") {
+                    tickets.push(t);
+                } else {
+                    eprintln!(
+                        "[gitteam] skipping {}: id does not start with TKT-",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("[gitteam] skipping malformed ticket {}: {}", path.display(), e),
         }
     }
     sort_tickets_desc(&mut tickets);
@@ -384,6 +648,486 @@ fn delete_ticket(filename: String) -> Result<(), String> {
     fs::remove_file(&path).map_err(|e| format!("remove failed: {}", e))
 }
 
+// ----- git config commands (Fase 2) -----
+
+#[tauri::command]
+async fn git_get_config() -> Result<Option<GitConfig>, String> {
+    read_git_config()
+}
+
+#[tauri::command]
+async fn git_save_config(config: GitConfig, pat: String) -> Result<(), String> {
+    save_pat(&pat)?;
+    write_git_config(&config)?;
+    let dir = data_dir()?;
+    if dir.join(".git").exists() {
+        let _ = run_git(
+            &dir,
+            &["config", "user.name", &config.git_user_name],
+            10,
+            None,
+        )
+        .await;
+        let _ = run_git(
+            &dir,
+            &["config", "user.email", &config.git_user_email],
+            10,
+            None,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn git_delete_config() -> Result<(), String> {
+    let _ = delete_pat();
+    let path = config_path()?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("remove config failed: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn git_load_pat() -> Result<String, String> {
+    load_pat()
+}
+
+#[tauri::command]
+async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionResult, String> {
+    let auth_url = with_authenticated_url(&url, &pat);
+    let repo_name = extract_repo_name(&url);
+    let mut cmd = Command::new("git");
+    cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
+    let result = timeout(Duration::from_secs(15), cmd.output()).await;
+
+    match result {
+        Err(_) => Ok(TestConnectionResult {
+            ok: false,
+            head_sha: None,
+            repo_name,
+            error: Some("Connection timed out after 15s".to_string()),
+        }),
+        Ok(Err(e)) => Ok(TestConnectionResult {
+            ok: false,
+            head_sha: None,
+            repo_name,
+            error: Some(format!("Failed to run git: {}", e)),
+        }),
+        Ok(Ok(output)) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let user_msg = if stderr.is_empty() {
+                format!("git ls-remote failed with exit {}", output.status)
+            } else {
+                stderr
+            };
+            Ok(TestConnectionResult {
+                ok: false,
+                head_sha: None,
+                repo_name,
+                error: Some(user_msg),
+            })
+        }
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let head_sha = stdout
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().next())
+                .map(|s| s.to_string());
+            Ok(TestConnectionResult {
+                ok: true,
+                head_sha,
+                repo_name,
+                error: None,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+async fn git_setup_repo(config: GitConfig, pat: String) -> Result<SetupResult, String> {
+    let dir = data_dir()?;
+
+    let test = git_test_connection(config.repo_url.clone(), pat.clone()).await?;
+    if !test.ok {
+        return Err(format!(
+            "Connection test failed: {}",
+            test.error.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+    let remote_head = test.head_sha.clone().unwrap_or_default();
+
+    let auth_url = with_authenticated_url(&config.repo_url, &pat);
+
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
+        let mut cmd = Command::new("git");
+        cmd.arg("clone").arg(&auth_url).arg(&dir);
+        let output = timeout(Duration::from_secs(60), cmd.output())
+            .await
+            .map_err(|_| "git clone timed out after 60s".to_string())?
+            .map_err(|e| format!("git clone failed to spawn: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git clone failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    } else if !dir.join(".git").exists() {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&dir);
+        cmd.arg("init");
+        let status = timeout(Duration::from_secs(15), cmd.status())
+            .await
+            .map_err(|_| "git init timed out".to_string())?
+            .map_err(|e| format!("git init failed: {}", e))?;
+        if !status.success() {
+            return Err("git init failed".to_string());
+        }
+
+        let _ = run_git(
+            &dir,
+            &["config", "user.name", &config.git_user_name],
+            10,
+            None,
+        )
+        .await;
+        let _ = run_git(
+            &dir,
+            &["config", "user.email", &config.git_user_email],
+            10,
+            None,
+        )
+        .await;
+
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&dir);
+        cmd.args(&["remote", "add", "origin", &auth_url]);
+        let status = timeout(Duration::from_secs(15), cmd.status())
+            .await
+            .map_err(|_| "git remote add timed out".to_string())?
+            .map_err(|e| format!("git remote add failed: {}", e))?;
+        if !status.success() {
+            return Err("git remote add failed".to_string());
+        }
+
+        let output = run_git(&dir, &["fetch"], 60, None).await?;
+        let _ = output;
+
+        let reset_main = run_git(&dir, &["reset", "--hard", "origin/main"], 15, None).await;
+        if reset_main.is_err() {
+            let reset_master = run_git(&dir, &["reset", "--hard", "origin/master"], 15, None).await;
+            if reset_master.is_err() {
+                return Err("Neither origin/main nor origin/master exists in the remote repo. Please create the default branch.".to_string());
+            }
+        }
+    } else {
+        let existing = run_git(&dir, &["remote", "get-url", "origin"], 10, None)
+            .await
+            .map_err(|_| {
+                "Could not read origin remote. Data directory is not properly initialized."
+                    .to_string()
+            })?;
+        let existing_normalized = strip_userinfo(existing.trim());
+        let config_normalized = strip_userinfo(&config.repo_url);
+        if existing_normalized != config_normalized {
+            return Err("Data directory already initialized with a different repository. Please disconnect first.".to_string());
+        }
+
+        run_git(&dir, &["fetch"], 60, None).await?;
+
+        let pull_status = run_git(
+            &dir,
+            &["pull", "--rebase", "--autostash"],
+            30,
+            Some((&config.git_user_name, &config.git_user_email)),
+        )
+        .await;
+        if let Err(e) = pull_status {
+            if e.to_lowercase().contains("conflict") {
+                return Err(format!("CONFLICT: {}", e));
+            }
+            return Err(e);
+        }
+    }
+
+    save_pat(&pat)?;
+
+    let mut config_to_save = config.clone();
+    config_to_save.last_sync_at = Some(now_iso());
+    write_git_config(&config_to_save)?;
+
+    let _ = run_git(
+        &dir,
+        &["config", "user.name", &config.git_user_name],
+        10,
+        None,
+    )
+    .await;
+    let _ = run_git(
+        &dir,
+        &["config", "user.email", &config.git_user_email],
+        10,
+        None,
+    )
+    .await;
+
+    let files_count = fs::read_dir(&dir)
+        .map(|entries| entries.flatten().filter(|e| e.path().is_file()).count() as u32)
+        .unwrap_or(0);
+
+    let head = git_head(&dir).await.unwrap_or(remote_head);
+
+    Ok(SetupResult {
+        config: config_to_save,
+        head_sha: head,
+        files_count,
+    })
+}
+
+#[tauri::command]
+async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository. Please reconnect.".to_string());
+    }
+
+    run_git(&dir, &["fetch"], 30, None).await?;
+
+    let count_output = run_git(&dir, &["log", "HEAD..@{u}", "--oneline"], 10, None)
+        .await
+        .unwrap_or_default();
+    let commits_pulled = if count_output.trim().is_empty() {
+        0
+    } else {
+        count_output.lines().count() as u32
+    };
+
+    let pull = run_git(
+        &dir,
+        &["pull", "--rebase", "--autostash"],
+        30,
+        Some((&config.git_user_name, &config.git_user_email)),
+    )
+    .await;
+
+    if let Err(e) = pull {
+        let lower = e.to_lowercase();
+        if lower.contains("conflict") {
+            return Err(format!("CONFLICT: {}", e));
+        }
+        return Err(e);
+    }
+
+    let head_sha = git_head(&dir).await?;
+
+    let files_changed = if commits_pulled > 0 {
+        let files_output =
+            run_git(&dir, &["log", "-n", &commits_pulled.to_string(), "--name-only", "--format="], 10, None)
+                .await
+                .unwrap_or_default();
+        files_output
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        vec![]
+    };
+
+    Ok(PullResult {
+        head_sha,
+        files_changed,
+        commits_pulled,
+    })
+}
+
+#[tauri::command]
+async fn git_push(config: GitConfig) -> Result<PushResult, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository. Please reconnect.".to_string());
+    }
+
+    let upstream_check = run_git(
+        &dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic", "@{u}"],
+        10,
+        None,
+    )
+    .await;
+
+    let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
+    if upstream_check.is_err() {
+        cmd.args(&["push", "-u", "origin", "HEAD"]);
+    } else {
+        cmd.args(&["push", "origin", "HEAD"]);
+    }
+
+    let output = timeout(Duration::from_secs(60), cmd.output())
+        .await
+        .map_err(|_| "git push timed out after 60s".to_string())?
+        .map_err(|e| format!("git push failed to spawn: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let lower = stderr.to_lowercase();
+        if lower.contains("non-fast-forward") || lower.contains("rejected") {
+            return Err(format!("REJECTED: {}", stderr));
+        }
+        return Err(format!("git push failed: {}", stderr));
+    }
+
+    let head_sha = git_head(&dir).await?;
+    Ok(PushResult { head_sha })
+}
+
+#[tauri::command]
+async fn git_commit_ticket(
+    filename: String,
+    action: String,
+    config: GitConfig,
+) -> Result<CommitResult, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository. Please reconnect.".to_string());
+    }
+
+    let add = run_git(&dir, &["add", &filename], 10, None).await;
+    if let Err(e) = add {
+        return Err(format!("git add failed: {}", e));
+    }
+
+    let head_before = git_head(&dir).await.unwrap_or_default();
+
+    let mut diff_cmd = build_git_cmd(&dir);
+    diff_cmd.args(&["diff", "--cached", "--quiet"]);
+    let diff_status = timeout(Duration::from_secs(10), diff_cmd.status())
+        .await
+        .map_err(|_| "git diff --cached timed out".to_string())?
+        .map_err(|e| format!("git diff --cached failed: {}", e))?;
+
+    if diff_status.success() {
+        return Ok(CommitResult {
+            committed: false,
+            head_sha: head_before,
+            commit_message: None,
+        });
+    }
+
+    let id = extract_ticket_id(&filename);
+    let commit_msg = format!("ticket: {} {}", id, action);
+
+    let commit = run_git(
+        &dir,
+        &["commit", "-m", &commit_msg],
+        15,
+        Some((&config.git_user_name, &config.git_user_email)),
+    )
+    .await;
+    if let Err(e) = commit {
+        return Err(format!("git commit failed: {}", e));
+    }
+
+    let upstream_check = run_git(
+        &dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic", "@{u}"],
+        10,
+        None,
+    )
+    .await;
+
+    let mut push_cmd =
+        build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
+    if upstream_check.is_err() {
+        push_cmd.args(&["push", "-u", "origin", "HEAD"]);
+    } else {
+        push_cmd.args(&["push", "origin", "HEAD"]);
+    }
+
+    let push_output = timeout(Duration::from_secs(60), push_cmd.output())
+        .await
+        .map_err(|_| "git push timed out after 60s".to_string())?
+        .map_err(|e| format!("git push failed to spawn: {}", e))?;
+
+    if !push_output.status.success() {
+        let stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
+        let lower = stderr.to_lowercase();
+        if lower.contains("non-fast-forward") || lower.contains("rejected") {
+            return Err(format!("REJECTED: {}", stderr));
+        }
+        return Err(format!("git push failed: {}", stderr));
+    }
+
+    let new_head = git_head(&dir).await?;
+    Ok(CommitResult {
+        committed: true,
+        head_sha: new_head,
+        commit_message: Some(commit_msg),
+    })
+}
+
+#[tauri::command]
+async fn git_status() -> Result<GitStatus, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Err("Data directory is not a git repository.".to_string());
+    }
+
+    let current_sha = git_head(&dir).await?;
+
+    let branch_output = run_git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"], 10, None)
+        .await
+        .unwrap_or_else(|_| "unknown".to_string());
+    let current_branch = branch_output.trim().to_string();
+
+    let unpushed_output = run_git(&dir, &["log", "@{u}..", "--oneline"], 10, None).await;
+    let unpushed_count = match unpushed_output {
+        Ok(s) if s.trim().is_empty() => 0,
+        Ok(s) => s.lines().count() as u32,
+        Err(_) => 0,
+    };
+
+    let status_output = run_git(&dir, &["status", "--porcelain"], 10, None)
+        .await
+        .unwrap_or_default();
+    let uncommitted_count = if status_output.trim().is_empty() {
+        0
+    } else {
+        status_output.lines().count() as u32
+    };
+
+    Ok(GitStatus {
+        current_sha,
+        current_branch,
+        unpushed_count,
+        uncommitted_count,
+        is_clean: uncommitted_count == 0,
+    })
+}
+
+#[tauri::command]
+async fn git_list_local_changes() -> Result<Vec<String>, String> {
+    let dir = ensure_data_dir()?;
+    if !dir.join(".git").exists() {
+        return Ok(vec![]);
+    }
+    let output = run_git(&dir, &["status", "--porcelain"], 10, None)
+        .await
+        .unwrap_or_default();
+    let files: Vec<String> = output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.chars().skip(3).collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok(files)
+}
+
+// ----- runner -----
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -398,6 +1142,17 @@ pub fn run() {
             create_ticket,
             update_ticket,
             delete_ticket,
+            git_get_config,
+            git_save_config,
+            git_delete_config,
+            git_load_pat,
+            git_test_connection,
+            git_setup_repo,
+            git_pull,
+            git_push,
+            git_commit_ticket,
+            git_status,
+            git_list_local_changes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
