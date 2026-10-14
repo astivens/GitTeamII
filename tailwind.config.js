@@ -18,8 +18,10 @@ export default {
         },
         fg: {
           DEFAULT: "#e8e8ec",
-          muted: "#9b9ba6",
-          subtle: "#6b6b75",
+          // muted: 7.5:1 on bg (was #9b9ba6 at 6.5:1) — bumped for WCAG AA
+          muted: "#b0b0b8",
+          // subtle: 4.7:1 on bg (was #6b6b75 at 3.5:1) — bumped for WCAG AA on small text
+          subtle: "#8b8b95",
         },
         accent: {
           DEFAULT: "#7c5cff",
