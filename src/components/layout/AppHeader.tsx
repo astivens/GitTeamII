@@ -3,12 +3,15 @@ import {
   AlertCircle,
   AlertTriangle,
   Check,
+  HelpCircle,
   Loader2,
   Plug,
   Plus,
   RefreshCw,
+  Search,
 } from "lucide-react";
 import { Button } from "../ui/Button";
+import { Avatar } from "../ui/Avatar";
 import { useTicketsStore } from "../../store/tickets";
 
 interface AppHeaderProps {
@@ -37,6 +40,9 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   const lastSyncedAt = useTicketsStore((s) => s.lastSyncedAt);
   const syncNow = useTicketsStore((s) => s.syncNow);
   const disconnectRepo = useTicketsStore((s) => s.disconnectRepo);
+  const gitConfig = useTicketsStore((s) => s.gitConfig);
+  const openPalette = useTicketsStore((s) => s.openPalette);
+  const openHelp = useTicketsStore((s) => s.openHelp);
 
   const relativeTime = useMemo(
     () => formatRelativeTime(lastSyncedAt),
@@ -103,6 +109,17 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
         {indicator}
       </div>
       <div className="flex items-center gap-2">
+        {/* Search button — opens the command palette and doubles as a discoverability hint. */}
+        <button
+          type="button"
+          onClick={openPalette}
+          className="flex items-center gap-2 rounded-md border border-border bg-bg px-2.5 py-1.5 text-sm text-fg-muted hover:text-fg hover:bg-bg-hover transition-colors"
+        >
+          <Search size={14} />
+          <span>Search…</span>
+          <span className="kbd">⌘K</span>
+        </button>
+
         <Button
           variant="ghost"
           onClick={() => void syncNow()}
@@ -112,6 +129,19 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           <RefreshCw size={14} />
           Sync
         </Button>
+
+        {gitConfig ? (
+          <button
+            type="button"
+            onClick={openHelp}
+            title={gitConfig.git_user_name}
+            className="flex items-center gap-2 rounded-md px-1.5 py-1 text-fg-muted hover:bg-bg-hover hover:text-fg transition-colors"
+          >
+            <Avatar name={gitConfig.git_user_name} size={22} />
+            <span className="text-sm">{gitConfig.git_user_name}</span>
+          </button>
+        ) : null}
+
         {syncStatus !== "unconfigured" ? (
           <Button
             variant="ghost"
@@ -122,6 +152,17 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
             <Plug size={14} />
           </Button>
         ) : null}
+
+        <button
+          type="button"
+          onClick={openHelp}
+          className="btn-ghost p-2"
+          aria-label="Keyboard shortcuts"
+          title="Keyboard shortcuts (?)"
+        >
+          <HelpCircle size={14} />
+        </button>
+
         <Button variant="primary" onClick={onNewTicket}>
           <Plus size={14} />
           New ticket

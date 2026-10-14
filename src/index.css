@@ -41,6 +41,17 @@
   }
 }
 
+@keyframes palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @layer components {
   .btn {
     @apply inline-flex items-center justify-center gap-1.5 rounded-md px-2.5 py-1.5
@@ -67,5 +78,10 @@
   .chip {
     @apply inline-flex items-center gap-1 rounded-md px-1.5 py-0.5
       text-xs font-medium;
+  }
+  .kbd {
+    @apply inline-flex items-center justify-center min-w-[1.5rem] h-5 px-1
+      rounded border border-border bg-bg-subtle
+      text-[10px] font-mono text-fg-muted uppercase tracking-wide;
   }
 }

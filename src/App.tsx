@@ -2,15 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { AppHeader } from "./components/layout/AppHeader";
-import { EmptyState } from "./components/layout/EmptyState";
+import { EmptyState, OnboardingState } from "./components/layout/EmptyState";
 import { KanbanBoard } from "./components/tickets/KanbanBoard";
 import { TicketModal } from "./components/tickets/TicketModal";
 import { Button } from "./components/ui/Button";
+import { CommandPalette } from "./components/ui/CommandPalette";
+import { HelpOverlay } from "./components/ui/HelpOverlay";
 import { ToastHost } from "./components/ui/ToastHost";
 import { SetupScreen } from "./components/setup/SetupScreen";
 import { ConflictBanner } from "./components/conflicts/ConflictBanner";
 import { ConflictModal } from "./components/conflicts/ConflictModal";
 import { useTicketsStore } from "./store/tickets";
+import { useGlobalShortcuts } from "./lib/keyboard";
 import { pushToast } from "./lib/toast";
 import type { Ticket } from "./types/ticket";
 
@@ -34,6 +37,7 @@ function App() {
   const syncStatus = useTicketsStore((s) => s.syncStatus);
   const loadConfig = useTicketsStore((s) => s.loadConfig);
   const syncError = useTicketsStore((s) => s.syncError);
+  const justSetup = useTicketsStore((s) => s.justSetup);
 
   const [modal, setModal] = useState<ModalState>({ kind: "closed" });
   const [conflictModalOpen, setConflictModalOpen] = useState(false);
@@ -95,24 +99,21 @@ function App() {
     };
   }, []);
 
-  const showEmpty = useMemo(
-    () => initialized && !loading && tickets.length === 0,
-    [initialized, loading, tickets],
-  );
-
-  // First-time setup: full-screen SetupScreen
-  if (bootDone && syncStatus === "unconfigured") {
-    return (
-      <div className="h-full bg-bg text-fg">
-        <SetupScreen />
-        <ToastHost />
-      </div>
-    );
-  }
+  // Global shortcuts (Cmd+K, n, /, ?).
+  useGlobalShortcuts();
 
   const onNew = () => setModal({ kind: "create" });
   const onSelect = (t: Ticket) => setModal({ kind: "edit", ticket: t });
   const onClose = () => setModal({ kind: "closed" });
+
+  // Wire the global "new ticket" shortcut (the `n` key) to the same handler.
+  useEffect(() => {
+    function onShortcut() {
+      onNew();
+    }
+    window.addEventListener("gitteam:new-ticket", onShortcut);
+    return () => window.removeEventListener("gitteam:new-ticket", onShortcut);
+  }, []);
 
   const onDelete = async (t: Ticket) => {
     const ok = window.confirm(`Delete ${t.id}? This cannot be undone.`);
@@ -128,6 +129,22 @@ function App() {
       );
     }
   };
+
+  const showEmpty = useMemo(
+    () => initialized && !loading && tickets.length === 0,
+    [initialized, loading, tickets],
+  );
+
+  // First-time setup: full-screen SetupScreen
+  if (bootDone && syncStatus === "unconfigured") {
+    return (
+      <div className="h-full bg-bg text-fg">
+        <SetupScreen />
+        <ToastHost />
+        <HelpOverlay />
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col bg-bg text-fg">
@@ -176,7 +193,11 @@ function App() {
             </Button>
           </div>
         ) : showEmpty ? (
-          <EmptyState onCreate={onNew} />
+          justSetup ? (
+            <OnboardingState onCreate={onNew} />
+          ) : (
+            <EmptyState onCreate={onNew} />
+          )
         ) : (
           <KanbanBoard tickets={tickets} onSelect={onSelect} />
         )}
@@ -192,10 +213,20 @@ function App() {
         }
       />
 
+      <CommandPalette
+        onCreateTicket={onNew}
+        onEditTicket={(filename) => {
+          const t = tickets.find((x) => x.filename === filename);
+          if (t) onSelect(t);
+        }}
+      />
+
       <ConflictModal
         open={conflictModalOpen}
         onClose={() => setConflictModalOpen(false)}
       />
+
+      <HelpOverlay />
 
       <ToastHost />
     </div>

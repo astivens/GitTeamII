@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri";
 import { pushToast } from "../lib/toast";
-import type { CreateTicketInput, Ticket } from "../types/ticket";
+import type { CreateTicketInput, Ticket, TicketStatus } from "../types/ticket";
 import type { GitConfig, SyncStatus } from "../types/git";
 
 // ----- debounce (module-level so it survives across store actions) -----
@@ -41,6 +41,14 @@ interface TicketsState {
   pendingCommits: Set<string>;
   conflicts: string[];
 
+  // Fase 5 — UI state
+  paletteOpen: boolean;
+  paletteFocusQuery: string | null;
+  helpOpen: boolean;
+  statusFilter: "all" | TicketStatus;
+  /** Transient: true right after a fresh setup, cleared on first create/update. */
+  justSetup: boolean;
+
   initialize: () => Promise<void>;
   refresh: () => Promise<void>;
   create: (input: CreateTicketInput) => Promise<Ticket>;
@@ -63,6 +71,15 @@ interface TicketsState {
   startWatcher: () => Promise<void>;
   stopWatcher: () => Promise<void>;
   setRemoteSha: (sha: string | null) => void;
+
+  // Fase 5 — UI actions
+  openPalette: () => void;
+  closePalette: () => void;
+  openHelp: () => void;
+  closeHelp: () => void;
+  setStatusFilter: (filter: "all" | TicketStatus) => void;
+  markJustSetup: () => void;
+  clearJustSetup: () => void;
 
   // Conflict resolution actions (Fase 4)
   loadConflicts: () => Promise<void>;
@@ -152,6 +169,13 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     pendingCommits: new Set<string>(),
     conflicts: [],
 
+    // Fase 5 — UI state defaults
+    paletteOpen: false,
+    paletteFocusQuery: null,
+    helpOpen: false,
+    statusFilter: "all",
+    justSetup: false,
+
     initialize: async () => {
       set({ loading: true, error: null });
       try {
@@ -182,6 +206,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     },
 
     create: async (input: CreateTicketInput) => {
+      // Clear the onboarding flag on the first ticket the user creates.
+      set({ justSetup: false });
       const ticket = await api.createTicket(input);
       await get().refresh();
       const { gitConfig } = get();
@@ -192,6 +218,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     },
 
     update: async (filename: string, input: CreateTicketInput) => {
+      // Editing a ticket means the user has moved past onboarding.
+      set({ justSetup: false });
       const ticket = await api.updateTicket(filename, input);
       await get().refresh();
       const { gitConfig } = get();
@@ -277,6 +305,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         // Load tickets from the data dir
         const dir = await api.initDataDir();
         const tickets = await api.listTickets();
+        const isFirstRun = tickets.length === 0;
         set({
           dataDir: dir,
           tickets,
@@ -293,6 +322,12 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           }
         } catch {
           // Non-fatal — the user can still sync manually
+        }
+
+        // Recovered first-run state (repo just cloned, no tickets yet) → show
+        // the onboarding welcome card. Cleared on first create/update.
+        if (isFirstRun) {
+          set({ justSetup: true });
         }
       } catch (e) {
         set({
@@ -334,6 +369,11 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           }
         } catch {
           // Non-fatal
+        }
+        // Welcome the user with the onboarding variant of EmptyState on first
+        // run. Auto-clears on the first create/update call.
+        if (tickets.length === 0) {
+          set({ justSetup: true });
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -507,6 +547,16 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       });
       pushToast("Resolution aborted", "default");
     },
+
+    // ----- Fase 5 UI actions -----
+
+    openPalette: () => set({ paletteOpen: true }),
+    closePalette: () => set({ paletteOpen: false }),
+    openHelp: () => set({ helpOpen: true }),
+    closeHelp: () => set({ helpOpen: false }),
+    setStatusFilter: (filter) => set({ statusFilter: filter }),
+    markJustSetup: () => set({ justSetup: true }),
+    clearJustSetup: () => set({ justSetup: false }),
   };
 });
 
