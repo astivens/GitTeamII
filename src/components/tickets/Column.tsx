@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { useTicketsStore } from "../../store/tickets";
+import { pushToast } from "../../lib/toast";
 import type { Ticket, TicketStatus } from "../../types/ticket";
 import { TicketCard } from "./TicketCard";
 
@@ -9,7 +12,48 @@ interface ColumnProps {
   onSelect: (ticket: Ticket) => void;
 }
 
-export function Column({ label, dotClass, tickets, onSelect }: ColumnProps) {
+export function Column({ status, label, dotClass, tickets, onSelect }: ColumnProps) {
+  const [dragOver, setDragOver] = useState(false);
+  const update = useTicketsStore((s) => s.update);
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    // Only accept moves of our custom mime type — reject text selections etc.
+    if (!e.dataTransfer.types.includes("text/x-ticket-filename")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setDragOver(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+    const filename = e.dataTransfer.getData("text/x-ticket-filename");
+    if (!filename) return;
+    const ticket = tickets.find((t) => t.filename === filename);
+    if (!ticket) return;
+    // Dropping on its own column is a silent no-op.
+    if (ticket.status === status) return;
+    try {
+      await update(ticket.filename, {
+        title: ticket.title,
+        status,
+        priority: ticket.priority,
+        assignee: ticket.assignee,
+        tags: ticket.tags,
+        body: ticket.body,
+      });
+    } catch (err) {
+      pushToast(
+        `Could not move ticket: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  };
+
   return (
     <section className="flex h-full w-[320px] shrink-0 flex-col">
       <header className="flex items-center justify-between px-1 pb-2">
@@ -24,7 +68,16 @@ export function Column({ label, dotClass, tickets, onSelect }: ColumnProps) {
           {tickets.length}
         </span>
       </header>
-      <div className="flex-1 overflow-y-auto rounded-lg bg-bg-subtle border border-border p-3 space-y-2">
+      <div
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={`flex-1 overflow-y-auto rounded-lg bg-bg-subtle border p-3 space-y-2 transition-shadow ${
+          dragOver
+            ? "border-accent ring-2 ring-accent ring-inset"
+            : "border-border"
+        }`}
+      >
         {tickets.length === 0 ? (
           <p className="text-fg-subtle text-xs italic text-center py-6">
             No tickets here
