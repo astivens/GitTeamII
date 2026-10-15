@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Avatar } from "../ui/Avatar";
+import { BrandLockup } from "../ui/Brand";
 import { useTicketsStore } from "../../store/tickets";
 
 interface AppHeaderProps {
@@ -105,12 +106,7 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   return (
     <header className="h-14 shrink-0 flex items-center justify-between px-4 border-b bg-bg-subtle">
       <div className="flex items-center gap-3">
-        <span
-          className="font-mono text-fg text-base font-semibold"
-          style={{ letterSpacing: "-0.025em" }}
-        >
-          GitTeam
-        </span>
+        <BrandLockup size={24} />
         {indicator}
       </div>
       <div className="flex items-center gap-2">

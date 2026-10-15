@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Ticket, TicketPriority } from "../../types/ticket";
+import { CopyForAIButton } from "./CopyForAIButton";
 
 const priorityClass: Record<TicketPriority, string> = {
   low: "priority-dot-low",
@@ -15,6 +16,7 @@ interface TicketCardProps {
 
 export function TicketCard({ ticket, onClick }: TicketCardProps) {
   const [dragging, setDragging] = useState(false);
+  const [copyHint, setCopyHint] = useState(false);
 
   const handleDragStart = (e: React.DragEvent<HTMLButtonElement>) => {
     e.dataTransfer.setData("text/x-ticket-filename", ticket.filename);
@@ -24,6 +26,17 @@ export function TicketCard({ ticket, onClick }: TicketCardProps) {
 
   const handleDragEnd = () => {
     setDragging(false);
+  };
+
+  const handleYank = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(ticket.id);
+      setCopyHint(true);
+      window.setTimeout(() => setCopyHint(false), 1400);
+    } catch {
+      // Clipboard write failed — silent. The Copy for AI button is still available.
+    }
   };
 
   return (
@@ -43,6 +56,42 @@ export function TicketCard({ ticket, onClick }: TicketCardProps) {
           aria-hidden="true"
         />
         <span className="font-mono text-xs text-fg-muted">{ticket.id}</span>
+        {/* Y for yank — quick copy of the ticket ID to paste anywhere. */}
+        <button
+          type="button"
+          onClick={handleYank}
+          title="Copy ticket ID (Y)"
+          aria-label={`Copy ticket ID ${ticket.id}`}
+          className="shrink-0 inline-flex items-center justify-center font-mono"
+          // The button is always visible to keep keyboard / SR access predictable;
+          // on hover the bg shifts to accent and the label flips to confirm the copy.
+          style={{
+            width: 22,
+            height: 18,
+            borderRadius: 4,
+            border: "1px solid var(--border)",
+            background: copyHint ? "var(--status-done)" : "transparent",
+            color: copyHint ? "#ffffff" : "var(--fg-muted)",
+            fontSize: 10,
+            fontWeight: 600,
+            transition: "background-color 120ms, color 120ms",
+            opacity: 0.7,
+          }}
+          onMouseEnter={(e) => {
+            if (!copyHint) {
+              e.currentTarget.style.background = "var(--accent)";
+              e.currentTarget.style.color = "#ffffff";
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!copyHint) {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--fg-muted)";
+            }
+          }}
+        >
+          {copyHint ? "✓" : "Y"}
+        </button>
       </div>
       <p
         className="mt-1.5 text-sm font-medium text-fg line-clamp-2"
@@ -64,6 +113,8 @@ export function TicketCard({ ticket, onClick }: TicketCardProps) {
             {tag}
           </span>
         ))}
+        {/* Spacer + copy-raw-for-AI as a quiet secondary action */}
+        <CopyForAIButton filename={ticket.filename} compact />
       </div>
     </button>
   );
