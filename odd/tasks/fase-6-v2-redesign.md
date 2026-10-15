@@ -92,13 +92,13 @@ Llevar el visual diseñado en OpenPencil al código real, sacando Tailwind, defi
 
 ## Progress
 
-- [ ] Phase 6A — Foundation (Tailwind out, CSS tokens in)
-- [ ] Phase 6B — Identity (brand lockup, avatar violet, placeholders)
-- [ ] Phase 6C — Motion + Rituals (CSS animations, shortcuts, empty states)
-- [ ] Phase 6D — Multi-project backend
-- [ ] Phase 6E — Multi-project UI
-- [ ] Phase 6F — Graph backend
-- [ ] Phase 6G — Graph UI
+- [x] Phase 6A — Foundation (Tailwind out, CSS tokens in)
+- [x] Phase 6B — Identity (brand lockup, avatar violet, placeholders)
+- [x] Phase 6C — Motion + Rituals (CSS animations, shortcuts, empty states)
+- [x] Phase 6D — Multi-project backend (Project type, 5 new commands, smart data_dir routing)
+- [x] Phase 6E — Multi-project UI (ProjectSwitcher dropdown, NoProjectEmptyState)
+- [ ] Phase 6F — Graph backend (links in markdown, get_graph command)
+- [ ] Phase 6G — Graph UI (canvas/SVG rendering)
 
 ## Related
 
