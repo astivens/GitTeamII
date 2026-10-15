@@ -29,6 +29,8 @@ interface TicketsState {
   loading: boolean;
   error: string | null;
   selectedId: string | null;
+  /** Last ticket ID opened in the side panel/modal — used by the Y shortcut to know what to yank. */
+  lastViewedId: string | null;
   initialized: boolean;
   dataDir: string | null;
 
@@ -80,6 +82,7 @@ interface TicketsState {
   setStatusFilter: (filter: "all" | TicketStatus) => void;
   markJustSetup: () => void;
   clearJustSetup: () => void;
+  setLastViewedId: (id: string | null) => void;
 
   // Conflict resolution actions (Fase 4)
   loadConflicts: () => Promise<void>;
@@ -158,6 +161,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     loading: false,
     error: null,
     selectedId: null,
+    lastViewedId: null,
     initialized: false,
     dataDir: null,
 
@@ -239,6 +243,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     },
 
     select: (id: string | null) => set({ selectedId: id }),
+    setLastViewedId: (id: string | null) => set({ lastViewedId: id }),
 
     getRawMarkdown: async (filename: string) => {
       return api.readTicketRaw(filename);

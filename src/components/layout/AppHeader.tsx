@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Check,
   HelpCircle,
-  Loader2,
   Plug,
   Plus,
   RefreshCw,
@@ -56,8 +55,19 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
     switch (syncStatus) {
       case "syncing":
         return (
-          <span className="flex items-center gap-1 text-fg-muted text-xs">
-            <Loader2 size={14} className="animate-spin" />
+          <span className="flex items-center gap-1.5 text-fg-muted text-xs">
+            <span className="relative inline-flex shrink-0">
+              <span
+                className="inline-block rounded-full"
+                style={{
+                  width: 8,
+                  height: 8,
+                  background: "var(--status-progress)",
+                }}
+              />
+              {/* Soft pulse ring — same color, expanding outward, fading out */}
+              <span className="sync-pulse" />
+            </span>
             Syncing
           </span>
         );

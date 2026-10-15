@@ -67,11 +67,18 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
   const create = useTicketsStore((s) => s.create);
   const update = useTicketsStore((s) => s.update);
 
+  const setLastViewedId = useTicketsStore((s) => s.setLastViewedId);
+
   useEffect(() => {
     if (open) {
       setState(ticket ? fromTicket(ticket) : EMPTY);
+      // Track which ticket is currently viewed so the Y shortcut can yank its ID.
+      setLastViewedId(ticket ? ticket.id : null);
     }
-  }, [open, ticket]);
+    return () => {
+      if (open) setLastViewedId(null);
+    };
+  }, [open, ticket, setLastViewedId]);
 
   const updateField = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setState((prev) => ({ ...prev, [key]: value }));
