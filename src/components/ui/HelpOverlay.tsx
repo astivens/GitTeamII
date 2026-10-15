@@ -25,17 +25,30 @@ export function HelpOverlay() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="flex items-center justify-center p-4"
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 50,
+        background: "rgba(0, 0, 0, 0.6)",
+      }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) closeHelp();
       }}
     >
-      <div className="card w-full max-w-[480px] shadow-elevated">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+      <div
+        className="card w-full"
+        style={{ maxWidth: 480, boxShadow: "var(--shadow-elevated)" }}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b">
           <h2 className="text-base font-semibold text-fg">Keyboard shortcuts</h2>
           <button
             type="button"
-            className="btn-ghost p-1"
+            className="btn-ghost"
+            style={{ padding: 4 }}
             aria-label="Close"
             onClick={closeHelp}
           >
@@ -43,7 +56,7 @@ export function HelpOverlay() {
           </button>
         </div>
         <div className="p-4">
-          <ul className="divide-y divide-border">
+          <ul className="divide-border">
             {SHORTCUTS.map((s) => (
               <li
                 key={s.action}

@@ -83,43 +83,56 @@ export function CommandPalette({
 
   if (!open) return null;
 
+  const separatorStyle = { margin: "4px 0", height: 1, background: "var(--border)" };
+
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-center bg-black/40 pt-20"
+      className="flex justify-center"
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 50,
+        background: "rgba(0, 0, 0, 0.4)",
+        paddingTop: 80,
+      }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) closePalette();
       }}
     >
       <Command
         label="Global command palette"
-        className="w-[640px] max-w-[92vw] rounded-lg border border-border bg-bg-elevated shadow-elevated overflow-hidden animate-[palette-in_150ms_ease-out]"
+        className="rounded-lg border bg-bg-elevated overflow-hidden animate-paletteIn"
+        style={{ width: 640, maxWidth: "92vw", boxShadow: "var(--shadow-elevated)" }}
       >
-        <div className="flex items-center border-b border-border px-3">
+        <div className="flex items-center border-b px-3">
           <Command.Input
             autoFocus
             value={query}
             onValueChange={setQuery}
             placeholder="Type a command or search tickets…"
-            className="flex-1 bg-transparent border-0 outline-none text-sm text-fg py-3 placeholder:text-fg-subtle"
+            className="palette-input"
           />
           <span className="kbd">Esc</span>
         </div>
-        <Command.List className="max-h-[480px] overflow-y-auto p-1">
+        <Command.List
+          className="overflow-y-auto p-1"
+          style={{ maxHeight: 480 }}
+        >
           <Command.Empty className="px-3 py-6 text-center text-sm text-fg-muted">
             No matches.
           </Command.Empty>
 
-          <Command.Group
-            heading="Actions"
-            className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-subtle"
-          >
+          <Command.Group heading="Actions" className="palette-group">
             <Command.Item
               value="create new ticket"
               onSelect={() => {
                 closePalette();
                 onCreateTicket();
               }}
-              className="flex items-center gap-2 px-2 py-2 rounded-md text-sm text-fg cursor-pointer aria-selected:bg-bg-hover"
+              className="palette-item"
             >
               <Sparkles size={14} className="text-fg-muted" />
               Create new ticket
@@ -131,7 +144,7 @@ export function CommandPalette({
                   closePalette();
                   void syncNow();
                 }}
-                className="flex items-center gap-2 px-2 py-2 rounded-md text-sm text-fg cursor-pointer aria-selected:bg-bg-hover"
+                className="palette-item"
               >
                 <RefreshCw size={14} className="text-fg-muted" />
                 Sync now
@@ -147,7 +160,7 @@ export function CommandPalette({
                     closePalette();
                     setStatusFilter(f.value);
                   }}
-                  className="flex items-center gap-2 px-2 py-2 rounded-md text-sm text-fg cursor-pointer aria-selected:bg-bg-hover"
+                  className="palette-item"
                 >
                   <Icon size={14} className="text-fg-muted" />
                   {f.label}
@@ -156,12 +169,9 @@ export function CommandPalette({
             })}
           </Command.Group>
 
-          <Command.Separator className="my-1 h-px bg-border" />
+          <Command.Separator style={separatorStyle} />
 
-          <Command.Group
-            heading="Tickets"
-            className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-subtle"
-          >
+          <Command.Group heading="Tickets" className="palette-group">
             {filteredTickets.map((t) => {
               const tagLabel =
                 t.tags.length > 0 ? ` ${t.tags.join(" ")}` : "";
@@ -173,7 +183,7 @@ export function CommandPalette({
                     closePalette();
                     onEditTicket(t.filename);
                   }}
-                  className="flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer aria-selected:bg-bg-hover"
+                  className="palette-item"
                 >
                   <Tag size={14} className="text-fg-muted shrink-0" />
                   <span className="font-mono text-xs text-fg-muted shrink-0">
@@ -181,7 +191,10 @@ export function CommandPalette({
                   </span>
                   <span className="text-sm text-fg truncate">{t.title}</span>
                   {t.tags.length > 0 ? (
-                    <span className="text-[11px] text-fg-subtle shrink-0">
+                    <span
+                      className="text-fg-subtle shrink-0"
+                      style={{ fontSize: 11 }}
+                    >
                       {t.tags
                         .slice(0, 3)
                         .map((tag) => `#${tag}`)
@@ -195,11 +208,8 @@ export function CommandPalette({
 
           {hasGitConfig ? (
             <>
-              <Command.Separator className="my-1 h-px bg-border" />
-              <Command.Group
-                heading="Settings"
-                className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-subtle"
-              >
+              <Command.Separator style={separatorStyle} />
+              <Command.Group heading="Settings" className="palette-group">
                 <Command.Item
                   value="disconnect repository"
                   onSelect={() => {
@@ -207,7 +217,7 @@ export function CommandPalette({
                     pushToast("Disconnecting…", "default");
                     void disconnectRepo();
                   }}
-                  className="flex items-center gap-2 px-2 py-2 rounded-md text-sm text-fg cursor-pointer aria-selected:bg-bg-hover"
+                  className="palette-item"
                 >
                   <Plug size={14} className="text-fg-muted" />
                   Disconnect repository

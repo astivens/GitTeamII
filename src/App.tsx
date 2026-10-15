@@ -151,7 +151,7 @@ function App() {
       <AppHeader onNewTicket={onNew} />
 
       {dataDir ? (
-        <div className="px-4 py-1.5 text-xs text-fg-subtle font-mono border-b border-border bg-bg">
+        <div className="px-4 py-1.5 text-xs text-fg-subtle font-mono border-b bg-bg">
           {dataDir}
         </div>
       ) : null}
@@ -179,7 +179,10 @@ function App() {
               Could not connect to the repository.
             </p>
             {syncError ? (
-              <p className="text-fg-subtle text-xs max-w-md font-mono whitespace-pre-wrap">
+              <p
+                className="text-fg-subtle text-xs font-mono"
+                style={{ maxWidth: 448, whiteSpace: "pre-wrap" }}
+              >
                 {syncError}
               </p>
             ) : null}

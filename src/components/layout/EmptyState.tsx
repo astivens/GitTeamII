@@ -14,7 +14,7 @@ const ONBOARDING_STEPS: Array<{ num: string; label: string; hint?: string }> = [
 export function EmptyState({ onCreate }: EmptyStateProps) {
   return (
     <div className="h-full w-full flex flex-col items-center justify-center gap-4 text-center">
-      <div className="rounded-full bg-bg-subtle p-4 border border-border">
+      <div className="rounded-full bg-bg-subtle p-4 border">
         <Inbox size={32} className="text-fg-muted" />
       </div>
       <div className="space-y-1">
@@ -32,8 +32,17 @@ export function EmptyState({ onCreate }: EmptyStateProps) {
 
 export function OnboardingState({ onCreate }: EmptyStateProps) {
   return (
-    <div className="h-full w-full flex flex-col items-center justify-center gap-6 text-center px-6 max-w-lg mx-auto">
-      <div className="rounded-full bg-accent/15 p-4 border border-accent/30">
+    <div
+      className="h-full w-full flex flex-col items-center justify-center gap-6 text-center"
+      style={{ paddingLeft: 24, paddingRight: 24, maxWidth: 512, margin: "0 auto" }}
+    >
+      <div
+        className="rounded-full p-4 border"
+        style={{
+          background: "rgba(124, 92, 255, 0.15)",
+          borderColor: "rgba(124, 92, 255, 0.3)",
+        }}
+      >
         <Sparkles size={28} className="text-accent" />
       </div>
       <div className="space-y-1">
@@ -46,9 +55,12 @@ export function OnboardingState({ onCreate }: EmptyStateProps) {
         {ONBOARDING_STEPS.map((step) => (
           <li
             key={step.num}
-            className="flex items-start gap-3 rounded-md border border-border bg-bg-subtle px-3 py-2.5"
+            className="flex items-start gap-3 rounded-md border bg-bg-subtle px-3 py-2.5"
           >
-            <span className="shrink-0 inline-flex items-center justify-center h-6 w-6 rounded-full bg-accent/20 text-accent text-xs font-mono font-medium">
+            <span
+              className="shrink-0 inline-flex items-center justify-center h-6 w-6 rounded-full font-mono text-xs font-medium text-accent"
+              style={{ background: "rgba(124, 92, 255, 0.2)" }}
+            >
               {step.num}
             </span>
             <div className="flex items-center gap-2 text-sm text-fg">

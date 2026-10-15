@@ -111,6 +111,8 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
     }
   };
 
+  const gridStyle = { display: "grid", gridTemplateColumns: "repeat(2, 1fr)" };
+
   return (
     <Modal
       open={open}
@@ -144,7 +146,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
         placeholder="Short, action-oriented summary"
         autoFocus
       />
-      <div className="grid grid-cols-2 gap-3">
+      <div className="gap-3" style={gridStyle}>
         <Select
           label="Status"
           value={state.status}
@@ -172,7 +174,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
           ))}
         </Select>
       </div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="gap-3" style={gridStyle}>
         <Input
           label="Assignee"
           value={state.assignee}
@@ -187,11 +189,15 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
         />
       </div>
       <label className="flex flex-col gap-1 text-sm">
-        <span className="text-fg-muted text-xs font-medium uppercase tracking-wide">
+        <span
+          className="text-fg-muted text-xs font-medium"
+          style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}
+        >
           Body
         </span>
         <textarea
-          className="input min-h-[180px] font-mono text-sm leading-relaxed resize-y"
+          className="input font-mono text-sm"
+          style={{ minHeight: 180, lineHeight: 1.625, resize: "vertical" }}
           value={state.body}
           onChange={(e) => updateField("body", e.currentTarget.value)}
           placeholder="Markdown body — context, requirements, acceptance criteria…"

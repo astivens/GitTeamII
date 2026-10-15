@@ -1,19 +1,21 @@
-import type { SelectHTMLAttributes } from "react";
+import type { SelectHTMLAttributes, ReactNode } from "react";
 
 interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   label?: string;
+  children: ReactNode;
 }
 
-export function Select({ label, className, children, ...props }: SelectProps) {
+export function Select({ label, className = "", children, ...props }: SelectProps) {
   return (
-    <label className="flex flex-col gap-1 text-sm">
+    <label className="flex flex-col gap-1 w-full">
       {label ? (
-        <span className="text-fg-muted text-xs font-medium uppercase tracking-wide">
+        <span className="text-xs font-medium text-fg-muted uppercase tracking-wide">
           {label}
         </span>
       ) : null}
       <select
-        className={`input appearance-none pr-8 ${className ?? ""}`}
+        className={`input ${className}`}
+        style={{ appearance: "none" }}
         {...props}
       >
         {children}

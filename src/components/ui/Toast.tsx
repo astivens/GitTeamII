@@ -8,12 +8,12 @@ interface ToastViewProps {
 function toneClasses(tone: ToastTone): string {
   switch (tone) {
     case "success":
-      return "border-priority-low/50";
+      return "toast-success";
     case "error":
-      return "border-priority-urgent/60";
+      return "toast-error";
     case "default":
     default:
-      return "border-border";
+      return "";
   }
 }
 
@@ -22,9 +22,8 @@ export function Toast({ toast, onDismiss }: ToastViewProps) {
     <div
       role="status"
       onClick={() => onDismiss(toast.id)}
-      className={`card animate-[slideIn_180ms_ease-out] cursor-pointer shadow-elevated border ${toneClasses(
-        toast.tone,
-      )} px-3 py-2 min-w-[220px] max-w-[360px] text-sm text-fg`}
+      className={`toast cursor-pointer ${toneClasses(toast.tone)}`}
+      style={{ minWidth: 220, maxWidth: 360 }}
     >
       {toast.message}
     </div>

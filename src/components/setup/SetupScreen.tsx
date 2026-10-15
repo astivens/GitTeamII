@@ -56,17 +56,21 @@ export function SetupScreen() {
   return (
     <div className="h-full w-full flex flex-col items-center justify-center bg-bg px-4 py-8 overflow-y-auto">
       <div className="flex flex-col items-center gap-2 mb-8">
-        <div className="rounded-full bg-bg-subtle border border-border p-3">
+        <div className="rounded-full bg-bg-subtle border p-3">
           <GitBranch size={24} className="text-accent" />
         </div>
-        <h1 className="font-mono text-xl font-semibold tracking-tight text-fg">
+        <h1
+          className="font-mono text-xl font-semibold text-fg"
+          style={{ letterSpacing: "-0.025em" }}
+        >
           GitTeam
         </h1>
       </div>
 
       <form
         onSubmit={submit}
-        className="w-full max-w-[480px] card p-6 flex flex-col gap-4"
+        className="w-full card p-6 flex flex-col gap-4"
+        style={{ maxWidth: 480 }}
       >
         <div className="flex flex-col gap-1">
           <h2 className="text-fg font-medium">Connect your team's repository</h2>
@@ -104,7 +108,10 @@ export function SetupScreen() {
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div
+          className="gap-3"
+          style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)" }}
+        >
           <Input
             label="Git user name"
             type="text"
@@ -124,7 +131,14 @@ export function SetupScreen() {
         </div>
 
         {error ? (
-          <div className="text-sm text-priority-urgent border border-priority-urgent/40 bg-priority-urgent/10 rounded-md px-3 py-2">
+          <div
+            className="text-sm border rounded-md px-3 py-2"
+            style={{
+              color: "var(--priority-urgent)",
+              borderColor: "rgba(239, 68, 68, 0.4)",
+              background: "rgba(239, 68, 68, 0.1)",
+            }}
+          >
             {error}
           </div>
         ) : null}

@@ -1,20 +1,26 @@
-import { nameToColor, nameToInitials } from "../../lib/avatar";
-
 interface AvatarProps {
   name: string;
   size?: number;
 }
 
-export function Avatar({ name, size = 24 }: AvatarProps) {
-  const initials = nameToInitials(name);
-  const bg = nameToColor(name);
+/**
+ * Avatar — initials in a colored bubble.
+ * Background uses the accent color (violet) for brand consistency.
+ */
+export function Avatar({ name, size = 22 }: AvatarProps) {
+  const initials = name
+    .split(/\s+/)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .slice(0, 2)
+    .join("");
+
   return (
     <span
+      className="avatar"
+      style={{ width: size, height: size, fontSize: size * 0.45 }}
       aria-hidden="true"
-      className={`inline-flex items-center justify-center rounded-full font-mono text-[10px] font-medium text-fg ${bg}`}
-      style={{ height: size, width: size }}
     >
-      {initials}
+      {initials || "·"}
     </span>
   );
 }

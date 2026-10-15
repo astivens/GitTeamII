@@ -55,16 +55,19 @@ export function Column({ status, label, dotClass, tickets, onSelect }: ColumnPro
   };
 
   return (
-    <section className="flex h-full w-[320px] shrink-0 flex-col">
+    <section
+      className="flex h-full shrink-0 flex-col"
+      style={{ width: 320 }}
+    >
       <header className="flex items-center justify-between px-1 pb-2">
         <div className="flex items-center gap-2">
           <span
-            className={`inline-block h-2 w-2 rounded-full ${dotClass}`}
+            className={`status-dot ${dotClass}`}
             aria-hidden="true"
           />
           <h3 className="text-sm font-medium text-fg">{label}</h3>
         </div>
-        <span className="chip bg-bg-elevated text-fg-muted border border-border">
+        <span className="chip bg-bg-elevated text-fg-muted border">
           {tickets.length}
         </span>
       </header>
@@ -72,14 +75,15 @@ export function Column({ status, label, dotClass, tickets, onSelect }: ColumnPro
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`flex-1 overflow-y-auto rounded-lg bg-bg-subtle border p-3 space-y-2 transition-shadow ${
-          dragOver
-            ? "border-accent ring-2 ring-accent ring-inset"
-            : "border-border"
+        className={`drop-zone flex-1 overflow-y-auto rounded-lg bg-bg-subtle border p-3 space-y-2 ${
+          dragOver ? "is-dragover" : ""
         }`}
       >
         {tickets.length === 0 ? (
-          <p className="text-fg-subtle text-xs italic text-center py-6">
+          <p
+            className="text-fg-subtle text-xs text-center py-6"
+            style={{ fontStyle: "italic" }}
+          >
             No tickets here
           </p>
         ) : (
