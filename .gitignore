@@ -34,3 +34,6 @@ src-tauri/gen/
 
 # OS
 Thumbs.db
+
+# Local tooling caches
+.atl/
