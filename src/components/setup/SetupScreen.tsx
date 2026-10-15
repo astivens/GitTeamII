@@ -7,7 +7,7 @@ import { pushToast } from "../../lib/toast";
 import * as api from "../../lib/tauri";
 
 export function SetupScreen() {
-  const setupRepo = useTicketsStore((s) => s.setupRepo);
+  const addProject = useTicketsStore((s) => s.addProject);
 
   const [url, setUrl] = useState("");
   const [pat, setPat] = useState("");
@@ -38,11 +38,11 @@ export function SetupScreen() {
         setTesting(false);
         return;
       }
-      await setupRepo({
+      await addProject({
         url: trimmedUrl,
         pat: trimmedPat,
-        userName: trimmedName,
-        userEmail: trimmedEmail,
+        user_name: trimmedName,
+        user_email: trimmedEmail,
       });
       pushToast(`Connected to ${test.repo_name}`, "success");
     } catch (e) {

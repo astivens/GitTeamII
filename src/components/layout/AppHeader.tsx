@@ -39,7 +39,7 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   const syncError = useTicketsStore((s) => s.syncError);
   const lastSyncedAt = useTicketsStore((s) => s.lastSyncedAt);
   const syncNow = useTicketsStore((s) => s.syncNow);
-  const disconnectRepo = useTicketsStore((s) => s.disconnectRepo);
+  const removeActiveProject = useTicketsStore((s) => s.removeActiveProject);
   const gitConfig = useTicketsStore((s) => s.gitConfig);
   const openPalette = useTicketsStore((s) => s.openPalette);
   const openHelp = useTicketsStore((s) => s.openHelp);
@@ -156,7 +156,7 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
         {syncStatus !== "unconfigured" ? (
           <Button
             variant="ghost"
-            onClick={() => void disconnectRepo()}
+            onClick={() => void removeActiveProject()}
             aria-label="Disconnect repository"
             title="Disconnect repository"
           >

@@ -94,9 +94,153 @@ pub struct GitStatus {
     pub is_clean: bool,
 }
 
+// ----- project (multi-project support) -----
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub repo_url: String,
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AddProjectInput {
+    pub url: String,
+    pub pat: String,
+    pub user_name: String,
+    pub user_email: String,
+}
+
+fn projects_root() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
+    Ok(home.join(".gitteam").join("projects"))
+}
+
+fn project_dir(project_id: &str) -> Result<PathBuf, String> {
+    Ok(projects_root()?.join(project_id))
+}
+
+fn project_config_path(project_id: &str) -> Result<PathBuf, String> {
+    Ok(project_dir(project_id)?.join("config.json"))
+}
+
+fn active_marker_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
+    Ok(home.join(".gitteam").join(".active"))
+}
+
+fn derive_project_id(url: &str) -> String {
+    let name = extract_repo_name(url);
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn read_active_id() -> Result<Option<String>, String> {
+    let path = active_marker_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("read active failed: {}", e))?;
+    let id = content.trim().to_string();
+    if id.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(id))
+    }
+}
+
+fn write_active_id(project_id: &str) -> Result<(), String> {
+    let path = active_marker_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir active dir failed: {}", e))?;
+    }
+    fs::write(&path, project_id).map_err(|e| format!("write active failed: {}", e))?;
+    Ok(())
+}
+
+fn clear_active_id() -> Result<(), String> {
+    let path = active_marker_path()?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("clear active failed: {}", e))?;
+    }
+    Ok(())
+}
+
+fn save_pat_for_project(pat: &str, project_id: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(&format!("gitteam/{}", project_id), "github-pat")
+        .map_err(keyring_err)?;
+    entry.set_password(pat).map_err(keyring_err)
+}
+
+fn delete_pat_for_project(project_id: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(&format!("gitteam/{}", project_id), "github-pat")
+        .map_err(keyring_err)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(keyring_err(e)),
+    }
+}
+
+fn write_git_config_for_project(config: &GitConfig, project_id: &str) -> Result<(), String> {
+    let path = project_config_path(project_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir project config dir: {}", e))?;
+    }
+    let content = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("serialize project config failed: {}", e))?;
+    fs::write(&path, content).map_err(|e| format!("write project config failed: {}", e))?;
+    Ok(())
+}
+
+fn load_project(project_id: &str) -> Result<Option<Project>, String> {
+    let path = project_config_path(project_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("read project failed: {}", e))?;
+    let gc: GitConfig =
+        serde_json::from_str(&content).map_err(|e| format!("parse project failed: {}", e))?;
+    Ok(Some(Project {
+        id: project_id.to_string(),
+        name: extract_repo_name(&gc.repo_url),
+        repo_url: gc.repo_url,
+        last_sync_at: gc.last_sync_at,
+    }))
+}
+
 // ----- data dir -----
 
+fn current_project_id_opt() -> Option<String> {
+    read_active_id().ok().flatten()
+}
+
+/// Resolve the data dir for the active project, falling back to the legacy
+/// `~/.gitteam-data/` when no multi-project is set up. All existing ticket and
+/// git commands use this so they automatically pick up the active project.
 fn data_dir() -> Result<PathBuf, String> {
+    if let Some(id) = current_project_id_opt() {
+        if project_config_path(&id)?.exists() {
+            return project_dir(&id);
+        }
+    }
     let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
     Ok(home.join(".gitteam-data"))
 }
@@ -117,6 +261,11 @@ fn ensure_data_dir() -> Result<PathBuf, String> {
 }
 
 fn config_path() -> Result<PathBuf, String> {
+    if let Some(id) = current_project_id_opt() {
+        if project_config_path(&id)?.exists() {
+            return project_config_path(&id);
+        }
+    }
     let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
     Ok(home.join(".gitteam-config.json"))
 }
@@ -697,10 +846,9 @@ async fn git_load_pat() -> Result<String, String> {
     load_pat()
 }
 
-#[tauri::command]
-async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionResult, String> {
-    let auth_url = with_authenticated_url(&url, &pat);
-    let repo_name = extract_repo_name(&url);
+async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectionResult, String> {
+    let auth_url = with_authenticated_url(url, pat);
+    let repo_name = extract_repo_name(url);
     let mut cmd = Command::new("git");
     cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
     let result = timeout(Duration::from_secs(15), cmd.output()).await;
@@ -747,6 +895,11 @@ async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionR
             })
         }
     }
+}
+
+#[tauri::command]
+async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionResult, String> {
+    git_test_connection_inner(&url, &pat).await
 }
 
 #[tauri::command]
@@ -1480,6 +1633,112 @@ async fn git_current_remote_sha(
     Ok(guard.clone())
 }
 
+// ----- project commands -----
+
+#[tauri::command]
+fn list_projects() -> Result<Vec<Project>, String> {
+    let root = projects_root()?;
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut projects = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|e| format!("read_dir projects failed: {}", e))? {
+        let entry = entry.map_err(|e| format!("dir entry failed: {}", e))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if let Some(p) = load_project(&id)? {
+            projects.push(p);
+        }
+    }
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(projects)
+}
+
+#[tauri::command]
+fn get_active_project() -> Result<Option<Project>, String> {
+    match read_active_id()? {
+        Some(id) => load_project(&id),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn add_project(input: AddProjectInput) -> Result<Project, String> {
+    // Resolve project_id (append suffix on collision)
+    let base_id = derive_project_id(&input.url);
+    let mut id = base_id.clone();
+    let mut counter: u32 = 2;
+    while project_config_path(&id)?.exists() {
+        id = format!("{}-{}", base_id, counter);
+        counter += 1;
+    }
+
+    // Test connection
+    let test = git_test_connection_inner(&input.url, &input.pat).await?;
+    if !test.ok {
+        return Err(test
+            .error
+            .unwrap_or_else(|| "connection test failed".to_string()));
+    }
+
+    // Create project dir
+    let dir = project_dir(&id)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir project dir failed: {}", e))?;
+
+    // Save PAT + config
+    save_pat_for_project(&input.pat, &id)?;
+    let gc = GitConfig {
+        repo_url: input.url.clone(),
+        git_user_name: input.user_name.clone(),
+        git_user_email: input.user_email.clone(),
+        last_sync_at: None,
+    };
+    write_git_config_for_project(&gc, &id)?;
+
+    // Mark as active
+    write_active_id(&id)?;
+
+    Ok(Project {
+        id,
+        name: extract_repo_name(&input.url),
+        repo_url: gc.repo_url,
+        last_sync_at: None,
+    })
+}
+
+#[tauri::command]
+fn remove_project(project_id: String) -> Result<(), String> {
+    let was_active = read_active_id()?.as_deref() == Some(project_id.as_str());
+
+    // Best-effort keyring delete
+    let _ = delete_pat_for_project(&project_id);
+
+    // Remove project dir
+    let dir = project_dir(&project_id)?;
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("rmdir project failed: {}", e))?;
+    }
+
+    if was_active {
+        clear_active_id()?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn switch_project(project_id: String) -> Result<Project, String> {
+    let project = load_project(&project_id)?
+        .ok_or_else(|| format!("project '{}' not found", project_id))?;
+    write_active_id(&project_id)?;
+    Ok(project)
+}
+
 // ----- runner -----
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1516,6 +1775,12 @@ pub fn run() {
             git_start_watcher,
             git_stop_watcher,
             git_current_remote_sha,
+            // Multi-project (Fase 6)
+            list_projects,
+            get_active_project,
+            add_project,
+            remove_project,
+            switch_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

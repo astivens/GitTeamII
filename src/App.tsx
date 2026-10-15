@@ -33,9 +33,9 @@ function App() {
   const error = useTicketsStore((s) => s.error);
   const tickets = useTicketsStore((s) => s.tickets);
   const remove = useTicketsStore((s) => s.remove);
-  const dataDir = useTicketsStore((s) => s.dataDir);
+  const activeProject = useTicketsStore((s) => s.activeProject);
   const syncStatus = useTicketsStore((s) => s.syncStatus);
-  const loadConfig = useTicketsStore((s) => s.loadConfig);
+  const loadProjects = useTicketsStore((s) => s.loadProjects);
   const syncError = useTicketsStore((s) => s.syncError);
   const justSetup = useTicketsStore((s) => s.justSetup);
 
@@ -44,8 +44,8 @@ function App() {
   const [bootDone, setBootDone] = useState(false);
 
   useEffect(() => {
-    void loadConfig().finally(() => setBootDone(true));
-  }, [loadConfig]);
+    void loadProjects().finally(() => setBootDone(true));
+  }, [loadProjects]);
 
   // Window focus → auto-pull if synced and no pending local changes
   useEffect(() => {
@@ -150,9 +150,9 @@ function App() {
     <div className="h-full flex flex-col bg-bg text-fg">
       <AppHeader onNewTicket={onNew} />
 
-      {dataDir ? (
+      {activeProject ? (
         <div className="px-4 py-1.5 text-xs text-fg-subtle font-mono border-b bg-bg">
-          {dataDir}
+          {activeProject.id}
         </div>
       ) : null}
 
@@ -168,7 +168,7 @@ function App() {
         ) : error && !initialized ? (
           <div className="h-full w-full flex flex-col items-center justify-center gap-3">
             <p className="text-fg-muted">Failed to initialize: {error}</p>
-            <Button variant="primary" onClick={() => void loadConfig()}>
+            <Button variant="primary" onClick={() => void loadProjects()}>
               <RefreshCw size={14} />
               Retry
             </Button>
