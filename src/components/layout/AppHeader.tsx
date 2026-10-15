@@ -10,8 +10,8 @@ import {
   Search,
 } from "lucide-react";
 import { Button } from "../ui/Button";
-import { Avatar } from "../ui/Avatar";
 import { BrandLockup } from "../ui/Brand";
+import { ProjectSwitcher } from "./ProjectSwitcher";
 import { useTicketsStore } from "../../store/tickets";
 
 interface AppHeaderProps {
@@ -40,7 +40,6 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   const lastSyncedAt = useTicketsStore((s) => s.lastSyncedAt);
   const syncNow = useTicketsStore((s) => s.syncNow);
   const removeActiveProject = useTicketsStore((s) => s.removeActiveProject);
-  const gitConfig = useTicketsStore((s) => s.gitConfig);
   const openPalette = useTicketsStore((s) => s.openPalette);
   const openHelp = useTicketsStore((s) => s.openHelp);
 
@@ -141,17 +140,7 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           Sync
         </Button>
 
-        {gitConfig ? (
-          <button
-            type="button"
-            onClick={openHelp}
-            title={gitConfig.git_user_name}
-            className="user-chip"
-          >
-            <Avatar name={gitConfig.git_user_name} size={22} />
-            <span>{gitConfig.git_user_name}</span>
-          </button>
-        ) : null}
+        <ProjectSwitcher />
 
         {syncStatus !== "unconfigured" ? (
           <Button
