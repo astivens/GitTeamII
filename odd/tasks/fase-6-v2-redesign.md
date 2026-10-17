@@ -38,7 +38,7 @@ Los `S#` son el contrato. Donde el texto original del pedido está disponible se
 | T8 | S7 | Extraer `build_edges` + tests de edges | inline | hecho | `e865816` |
 | T9 | S8 | `GraphView` + toggle Board/Graph + editor de links en el modal | inline | hecho | `8168f16` |
 | T10 | S7 | Tests de `link_in_dir`/`unlink_in_dir` sobre archivos | inline | hecho | `fd05e12` |
-| T11 | S1–S8 | Actualizar feature doc y README | inline | en curso | — |
+| T11 | S1–S8 | Actualizar feature doc y README | inline | hecho | `576f7a2`, `aea4e09` |
 | T12 | S1 | Toggle de tema en la UI (`data-theme`) | — | **pendiente** | — |
 
 Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (no hubo unidades paralelas independientes ni backstop de contexto), ni el de verificación independiente (no hay ítem de alto riesgo nuevo con verificación independiente pendiente; ver `Risk` abajo).
