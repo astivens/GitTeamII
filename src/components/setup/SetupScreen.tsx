@@ -75,9 +75,11 @@ export function SetupScreen() {
         <div className="flex flex-col gap-1">
           <h2 className="text-fg font-medium">Connect your team's repository</h2>
           <p className="text-fg-muted text-sm">
-            GitTeam will clone it to{" "}
-            <code className="font-mono text-fg-subtle">~/.gitteam-data</code>{" "}
-            and keep it in sync.
+            GitTeam keeps a local copy under{" "}
+            <code className="font-mono text-fg-subtle">
+              ~/.gitteam/projects/
+            </code>{" "}
+            and keeps it in sync.
           </p>
         </div>
 
