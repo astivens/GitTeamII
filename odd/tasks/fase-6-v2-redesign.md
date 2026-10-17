@@ -40,6 +40,7 @@ Los `S#` son el contrato. Donde el texto original del pedido está disponible se
 | T10 | S7 | Tests de `link_in_dir`/`unlink_in_dir` sobre archivos | inline | hecho | `fd05e12` |
 | T11 | S1–S8 | Actualizar feature doc y README | inline | hecho | `576f7a2`, `aea4e09` |
 | T12 | S1 | Toggle de tema en la UI (`data-theme`) | — | **pendiente** | — |
+| T13 | S6 | **Fix sync destructivo**: GitTeam nunca commitea/pushea archivos que no son tickets; timeouts realistas; rechazo de checkouts incompletos | inline | hecho | (este commit) |
 
 Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (no hubo unidades paralelas independientes ni backstop de contexto), ni el de verificación independiente (no hay ítem de alto riesgo nuevo con verificación independiente pendiente; ver `Risk` abajo).
 
@@ -71,6 +72,15 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
 - **L5 (2026-10-17)** — Un test encontró una suposición mía incorrecta: `Matter::parse` recorta el `\n` final del body. El comportamiento del código era correcto; la aserción estaba mal y se corrigió.
 - **L6 (2026-10-17)** — Riesgo evitado: hacer que el prop `ticket` del modal se re-derive del store en cada render (para que los links se vieran en vivo) hacía que el `useEffect` re-sembrara el formulario ante cualquier refresh y **descartara ediciones en curso**. Se cambió para re-sembrar solo al abrir o cuando cambia el id del ticket.
 - **L7 (2026-10-17)** — Delivery: la rama acumula ~4025 inserciones / ~1005 borrados, muy por encima de las ~400 líneas. No hay push ni PR. Cuando el usuario quiera publicar, corresponde aplicar la estrategia de entrega elegida (proponer el corte en PRs encadenados) — es una decisión del humano bajo política ordinaria del repo.
+- **L8 (2026-10-17)** — Reporte verbatim: *\"estoy usando y me salen errores del sync, mira los logs\"*.
+  Estado real del proyecto `royero-labs` en disco: el repo linkeado es **el repo de aplicación del usuario** (Royero-Labs: backend Python + `lims-web` React + migraciones + tests, 50412 archivos, con `node_modules` commiteado), no un repo de tickets.
+  Cadena de daño que se encontró (y que **no llegó a dispararse**: el remoto quedó intacto, `refs/heads/main` == `0d52ea03` == HEAD local):
+  1. El índice local estaba reducido a **2 entradas** contra 50412 de HEAD → 50411 borrados staged. Un commit/push desde ahí borraba el repo del usuario en GitHub.
+  2. `syncNow` (frontend) hacía: pull → `gitListLocalChanges()` → `gitCommitTicket(file)` **por cada path** → push. `git_list_local_changes` devolvía **todos** los paths sucios del repo, no sólo tickets, y `git_commit_ticket` commiteaba *todo lo que estuviera staged*. Esa combinación era la vía directa al desastre.
+  3. Causa de fondo del checkout roto: el timeout de `git clone` era de **60s**. Un repo de 50k archivos (con node_modules commiteado) no clona en 60s, así que el clone moría a mitad de checkout dejando un object store completo al lado de un worktree a medio poblar — y a partir de ahí todo se lee como \"borraron todo\". Lo mismo con `pull` (30s): un pull matado a mitad de rebase deja el índice a medio aplicar (`.git/ORIG_HEAD` presente lo confirma).
+  Arreglado en T13: `git_list_local_changes` devuelve **sólo** archivos de ticket; `git_commit_ticket` rechaza cualquier path ajeno y commitea únicamente ese archivo (`git commit -- <path>`); `git_push` difea el rango exacto que publicaría (`upstream...HEAD`) y rechaza si toca algo que no es un ticket; clone 900s + limpieza del directorio si falla; presupuestos de fetch/pull/push/add/commit/status de 60-300s; y `setup_repo_inner` valida que el worktree tenga los archivos rastreados antes de aceptar el proyecto.
+  Recuperación aplicada sobre el checkout real: `git reset` (reconstruye el índice desde HEAD) + `git restore --worktree` (materializa los 504 faltantes). Quedó limpio, con los 2 tickets como untracked y el remoto intacto.
+- **L9 (2026-10-17)** — Decisión abierta (requiere al usuario): un repo de aplicación no es un repo de tickets. GitTeam fue diseñado asumiendo un repo dedicado a tickets; linkear el repo real de la app hace que los commits `ticket: ...` aterricen en `main` de la aplicación. Opciones: (a) repo dedicado de tickets (recomendado), (b) tickets en un subdirectorio del repo de la app, (c) otra política. Sin respuesta todavía.
 
 ## Criterios de aceptación
 
