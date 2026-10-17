@@ -927,6 +927,37 @@ fn find_ticket_path_by_id(dir: &Path, id: &str) -> Result<PathBuf, String> {
     Err(format!("ticket not found: {}", id))
 }
 
+/// Add `to` to `from`'s links, rewriting `from`'s file.
+///
+/// The target must exist so the graph never grows phantom nodes. Ids are
+/// expected to be normalized already by the command wrapper.
+fn link_in_dir(dir: &Path, from: &str, to: &str) -> Result<Ticket, String> {
+    if from == to {
+        return Err("cannot link a ticket to itself".to_string());
+    }
+    let path = find_ticket_path_by_id(dir, from)?;
+    // Resolve the target *before* writing so a typo cannot half-apply.
+    find_ticket_path_by_id(dir, to)?;
+
+    let mut ticket = parse_ticket_file(&path)?;
+    if !ticket.links.iter().any(|l| l == to) {
+        ticket.links.push(to.to_string());
+    }
+    ticket.links = normalize_links(&ticket.links, &ticket.id);
+    ticket.last_updated = now_iso();
+    atomic_write(&path, &render_frontmatter(&ticket))?;
+    Ok(ticket)
+}
+
+fn unlink_in_dir(dir: &Path, from: &str, to: &str) -> Result<Ticket, String> {
+    let path = find_ticket_path_by_id(dir, from)?;
+    let mut ticket = parse_ticket_file(&path)?;
+    ticket.links.retain(|l| l != to);
+    ticket.last_updated = now_iso();
+    atomic_write(&path, &render_frontmatter(&ticket))?;
+    Ok(ticket)
+}
+
 /// Add `to` to `from`'s `links`. The link is recorded on the source ticket
 /// only (like an Obsidian `[[wiki-link]]`); the graph renders the pair as one
 /// undirected edge.
@@ -935,21 +966,7 @@ fn link_tickets(from: String, to: String) -> Result<Ticket, String> {
     let dir = ensure_data_dir()?;
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
-    if from == to {
-        return Err("cannot link a ticket to itself".to_string());
-    }
-    let path = find_ticket_path_by_id(&dir, &from)?;
-    // Require the target to exist so the graph never grows phantom nodes.
-    find_ticket_path_by_id(&dir, &to)?;
-
-    let mut ticket = parse_ticket_file(&path)?;
-    if !ticket.links.iter().any(|l| l == &to) {
-        ticket.links.push(to);
-    }
-    ticket.links = normalize_links(&ticket.links, &ticket.id);
-    ticket.last_updated = now_iso();
-    atomic_write(&path, &render_frontmatter(&ticket))?;
-    Ok(ticket)
+    link_in_dir(&dir, &from, &to)
 }
 
 #[tauri::command]
@@ -957,13 +974,7 @@ fn unlink_tickets(from: String, to: String) -> Result<Ticket, String> {
     let dir = ensure_data_dir()?;
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
-    let path = find_ticket_path_by_id(&dir, &from)?;
-
-    let mut ticket = parse_ticket_file(&path)?;
-    ticket.links.retain(|l| l != &to);
-    ticket.last_updated = now_iso();
-    atomic_write(&path, &render_frontmatter(&ticket))?;
-    Ok(ticket)
+    unlink_in_dir(&dir, &from, &to)
 }
 
 /// Build the undirected edge list from declared links.
@@ -2169,5 +2180,115 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let b = ticket_with("TKT-2", &[]);
         let c = ticket_with("TKT-3", &[]);
         assert_eq!(build_edges(&[a, b, c]).len(), 2);
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("gitteam-test-dir-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    fn write_ticket(dir: &Path, id: &str, links: &[&str]) {
+        let mut t = sample_ticket(links.iter().map(|s| s.to_string()).collect());
+        t.id = id.to_string();
+        t.filename = format!("{}.md", id);
+        fs::write(dir.join(&t.filename), render_frontmatter(&t)).unwrap();
+    }
+
+    #[test]
+    fn link_in_dir_persists_the_link_and_the_graph_sees_the_edge() {
+        let dir = unique_temp_dir("link");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        let updated = link_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+        assert_eq!(updated.links, vec!["TKT-2".to_string()]);
+
+        // Read back from disk so this proves persistence, not just the return.
+        let edges = build_edges(&load_all_tickets(&dir).unwrap());
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source, "TKT-1");
+        assert_eq!(edges[0].target, "TKT-2");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_in_dir_is_idempotent() {
+        let dir = unique_temp_dir("link-idempotent");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        link_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+        link_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+
+        let tickets = load_all_tickets(&dir).unwrap();
+        let source = tickets.iter().find(|t| t.id == "TKT-1").unwrap();
+        assert_eq!(source.links, vec!["TKT-2".to_string()]);
+        assert_eq!(build_edges(&tickets).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_in_dir_rejects_an_unknown_target_without_touching_the_source() {
+        let dir = unique_temp_dir("link-unknown");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+
+        let before = fs::read_to_string(dir.join("TKT-1.md")).unwrap();
+        assert!(link_in_dir(&dir, "TKT-1", "TKT-999").is_err());
+        let after = fs::read_to_string(dir.join("TKT-1.md")).unwrap();
+        assert_eq!(before, after, "a rejected link must not rewrite the file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_in_dir_rejects_a_self_link() {
+        let dir = unique_temp_dir("link-self");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+        assert!(link_in_dir(&dir, "TKT-1", "TKT-1").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unlink_in_dir_removes_the_link_from_disk() {
+        let dir = unique_temp_dir("unlink");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &["TKT-2"]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        let updated = unlink_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+        assert!(updated.links.is_empty());
+        assert!(build_edges(&load_all_tickets(&dir).unwrap()).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_ticket_preserves_links() {
+        // A plain edit goes through `update_ticket`, which must never drop the
+        // links that `link_tickets` owns.
+        let dir = unique_temp_dir("update-keeps-links");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &["TKT-2"]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        let path = find_ticket_path_by_id(&dir, "TKT-1").unwrap();
+        let existing = parse_ticket_file(&path).unwrap();
+        let updated = Ticket {
+            title: "Renamed".to_string(),
+            last_updated: now_iso(),
+            links: existing.links,
+            ..existing
+        };
+        atomic_write(&path, &render_frontmatter(&updated)).unwrap();
+
+        let reread = parse_ticket_file(&path).unwrap();
+        assert_eq!(reread.title, "Renamed");
+        assert_eq!(reread.links, vec!["TKT-2".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
