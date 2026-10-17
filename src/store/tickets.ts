@@ -87,6 +87,10 @@ interface TicketsState {
   /** Transient: true right after a fresh setup, cleared on first create/update. */
   justSetup: boolean;
 
+  // Fase 6 — view mode
+  viewMode: "board" | "graph";
+  setViewMode: (mode: "board" | "graph") => void;
+
   initialize: () => Promise<void>;
   refresh: () => Promise<void>;
   create: (input: CreateTicketInput) => Promise<Ticket>;
@@ -228,6 +232,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     helpOpen: false,
     statusFilter: "all",
     justSetup: false,
+
+    viewMode: "board",
 
     initialize: async () => {
       set({ loading: true, error: null });
@@ -745,6 +751,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     setStatusFilter: (filter) => set({ statusFilter: filter }),
     markJustSetup: () => set({ justSetup: true }),
     clearJustSetup: () => set({ justSetup: false }),
+    setViewMode: (mode) => set({ viewMode: mode }),
   };
 });
 

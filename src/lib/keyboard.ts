@@ -29,6 +29,8 @@ function flashYankToast(label: string) {
  *   /           focus palette search
  *   ?           toggle help overlay
  *   Y (uppercase)  yank current ticket ID to clipboard
+ *   G then K    switch to the board view
+ *   G then G    switch to the graph view
  *
  * Mount once at the app root.
  *
@@ -38,6 +40,23 @@ function flashYankToast(label: string) {
  */
 export function useGlobalShortcuts(): void {
   useEffect(() => {
+    // "g" acts as a chord prefix: press g, then k for the board or g for the
+    // graph. The chord expires so a stray g never swallows the next keypress.
+    let gArmed = false;
+    let gTimer: ReturnType<typeof setTimeout> | null = null;
+    const disarmG = () => {
+      gArmed = false;
+      if (gTimer !== null) {
+        clearTimeout(gTimer);
+        gTimer = null;
+      }
+    };
+    const armG = () => {
+      gArmed = true;
+      if (gTimer !== null) clearTimeout(gTimer);
+      gTimer = setTimeout(disarmG, 1200);
+    };
+
     function onKey(e: KeyboardEvent): void {
       // Shortcuts that require a modifier (Cmd/Ctrl) fire regardless of focus
       // — that's the universal convention for command palettes.
@@ -56,6 +75,30 @@ export function useGlobalShortcuts(): void {
       // user is typing into a field.
       if (mod) return;
       if (isEditableTarget(e.target)) return;
+
+      // g-chord: g k -> board, g g -> graph.
+      if (gArmed) {
+        if (e.key === "k" || e.key === "K") {
+          e.preventDefault();
+          disarmG();
+          useTicketsStore.getState().setViewMode("board");
+          return;
+        }
+        if (e.key === "g" || e.key === "G") {
+          e.preventDefault();
+          disarmG();
+          useTicketsStore.getState().setViewMode("graph");
+          return;
+        }
+        // Any other key cancels the chord but still performs its own action.
+        disarmG();
+      }
+
+      if (e.key === "g" || e.key === "G") {
+        e.preventDefault();
+        armG();
+        return;
+      }
 
       if (e.key === "n" || e.key === "N") {
         e.preventDefault();
@@ -107,6 +150,9 @@ export function useGlobalShortcuts(): void {
     }
 
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      disarmG();
+    };
   }, []);
 }
