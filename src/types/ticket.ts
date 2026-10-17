@@ -8,6 +8,8 @@ export interface Ticket {
   assignee: string | null;
   priority: TicketPriority;
   tags: string[];
+  /** Related ticket ids, declared in frontmatter (`links: [TKT-1041]`). */
+  links: string[];
   last_updated: string;
   body: string;
   filename: string;

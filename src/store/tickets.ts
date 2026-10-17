@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as api from "../lib/tauri";
 import { pushToast } from "../lib/toast";
 import type { CreateTicketInput, Ticket, TicketStatus } from "../types/ticket";
+import type { Graph } from "../types/graph";
 import type {
   AddProjectInput,
   GitConfig,
@@ -102,6 +103,12 @@ interface TicketsState {
   removeActiveProject: () => Promise<void>;
   switchProject: (id: string) => Promise<Project>;
 
+  // Graph (Fase 6F)
+  graph: Graph | null;
+  loadGraph: () => Promise<void>;
+  linkTickets: (from: string, to: string) => Promise<void>;
+  unlinkTickets: (from: string, to: string) => Promise<void>;
+
   // Sync actions
   syncNow: () => Promise<void>;
   flushNow: () => Promise<void>;
@@ -201,6 +208,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
 
     projects: [],
     activeProject: null,
+
+    graph: null,
 
     // Deprecated — derived from activeProject in loadActiveProject / addProject.
     dataDir: null,
@@ -552,6 +561,38 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       });
       await get().loadActiveProject();
       return project;
+    },
+
+    loadGraph: async () => {
+      try {
+        const graph = await api.getGraph();
+        set({ graph });
+      } catch (e) {
+        pushToast(
+          `Could not build graph: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+      }
+    },
+
+    linkTickets: async (from, to) => {
+      const ticket = await api.linkTickets(from, to);
+      await get().refresh();
+      await get().loadGraph();
+      const { gitConfig } = get();
+      if (gitConfig) {
+        commitTicketChange(ticket.filename, "link", gitConfig);
+      }
+    },
+
+    unlinkTickets: async (from, to) => {
+      const ticket = await api.unlinkTickets(from, to);
+      await get().refresh();
+      await get().loadGraph();
+      const { gitConfig } = get();
+      if (gitConfig) {
+        commitTicketChange(ticket.filename, "unlink", gitConfig);
+      }
     },
 
     syncNow: async () => {
