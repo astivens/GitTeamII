@@ -966,6 +966,34 @@ fn unlink_tickets(from: String, to: String) -> Result<Ticket, String> {
     Ok(ticket)
 }
 
+/// Build the undirected edge list from declared links.
+///
+/// Links pointing at tickets that do not exist are dropped (they would
+/// otherwise render as phantom nodes), and each unordered pair is emitted
+/// exactly once, so `A → B` plus `B → A` collapses into a single edge.
+fn build_edges(tickets: &[Ticket]) -> Vec<GraphEdge> {
+    let known: std::collections::HashSet<&str> =
+        tickets.iter().map(|t| t.id.as_str()).collect();
+
+    let mut edges: Vec<GraphEdge> = Vec::new();
+    for t in tickets {
+        for link in &t.links {
+            if !known.contains(link.as_str()) {
+                continue;
+            }
+            let (a, b) = if t.id.as_str() < link.as_str() {
+                (t.id.clone(), link.clone())
+            } else {
+                (link.clone(), t.id.clone())
+            };
+            if !edges.iter().any(|e| e.source == a && e.target == b) {
+                edges.push(GraphEdge { source: a, target: b });
+            }
+        }
+    }
+    edges
+}
+
 #[tauri::command]
 fn get_graph() -> Result<Graph, String> {
     let dir = ensure_data_dir()?;
@@ -983,26 +1011,7 @@ fn get_graph() -> Result<Graph, String> {
         })
         .collect();
 
-    let known: std::collections::HashSet<&str> =
-        tickets.iter().map(|t| t.id.as_str()).collect();
-
-    let mut edges: Vec<GraphEdge> = Vec::new();
-    for t in &tickets {
-        for link in &t.links {
-            if !known.contains(link.as_str()) {
-                continue; // dangling link — skip instead of inventing a node
-            }
-            // Store one edge per unordered pair so A→B and B→A collapse.
-            let (a, b) = if t.id.as_str() < link.as_str() {
-                (t.id.clone(), link.clone())
-            } else {
-                (link.clone(), t.id.clone())
-            };
-            if !edges.iter().any(|e| e.source == a && e.target == b) {
-                edges.push(GraphEdge { source: a, target: b });
-            }
-        }
-    }
+    let edges = build_edges(&tickets);
 
     Ok(Graph { nodes, edges })
 }
@@ -2132,5 +2141,33 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             normalize_links(&input, "TKT-1041"),
             vec!["TKT-1".to_string(), "TKT-2".to_string()]
         );
+    }
+
+    fn ticket_with(id: &str, links: &[&str]) -> Ticket {
+        let mut t = sample_ticket(links.iter().map(|s| s.to_string()).collect());
+        t.id = id.to_string();
+        t
+    }
+
+    #[test]
+    fn build_edges_collapses_reciprocal_links() {
+        let a = ticket_with("TKT-1", &["TKT-2"]);
+        let b = ticket_with("TKT-2", &["TKT-1"]);
+        let edges = build_edges(&[a, b]);
+        assert_eq!(edges.len(), 1, "A→B and B→A must be one edge: {:?}", edges);
+    }
+
+    #[test]
+    fn build_edges_drops_links_to_unknown_tickets() {
+        let a = ticket_with("TKT-1", &["TKT-999"]);
+        assert!(build_edges(&[a]).is_empty());
+    }
+
+    #[test]
+    fn build_edges_keeps_distinct_pairs() {
+        let a = ticket_with("TKT-1", &["TKT-2", "TKT-3"]);
+        let b = ticket_with("TKT-2", &[]);
+        let c = ticket_with("TKT-3", &[]);
+        assert_eq!(build_edges(&[a, b, c]).len(), 2);
     }
 }
