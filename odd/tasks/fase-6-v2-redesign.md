@@ -63,7 +63,28 @@ Verificación de boundaries: `cargo test` + `npx tsc --noEmit` sobre cada tip en
 
 Overage honesto (una sola pasada de corte, como manda el skill `chained-pr`): los slices 1, 2, 3, 6 y 7 exceden el presupuesto de 400 líneas y **no hay corte cohesivo que los baje** — el slice 1 es un port mecánico de 24 archivos que no compila a medias, el 2 y el 3 son backend + la UI que lo consume, el 6 es la feature con su test de prueba y el 7 es un solo mecanismo. Recomendación: `size:exception` para esos cinco. Los slices 4, 5 y 8 entran en presupuesto.
 
-Los bodies de los 8 PR (con el `## Chain Context` que pide el skill) están en `/tmp/opencode/gitteam-prs/`, y el script que publica todo —push de las 9 ramas + los 8 PR— en `/tmp/opencode/gitteam-prs/open-chain.sh`. **Publicar es decisión del humano**: el script no se corrió.
+Los bodies de los 8 PR (con el `## Chain Context` que pide el skill) están en `/tmp/opencode/gitteam-prs/`, y el script que publica todo —push de las 9 ramas + los 8 PR— en `/tmp/opencode/gitteam-prs/open-chain.sh`. **La cadena se publicó** el 2026-10-18 con autorización explícita del usuario: 8 PR abiertos en `astivens/GitTeamII` (#1 → #8), cada uno con su base en el PR anterior y el diagrama de dependencias cosido con los números reales. Mergear en orden y con merge commit.
+
+### Review nativo (RDD) — slice 7, el merge driver
+
+Candidato: `d080b63..fc7a2e4` (1082 líneas, 4 archivos). Es el **único** de los 8 slices con `review_due` (`high_risk`); con el worktree parado en el tip de cada slice, los slices 1–6 y 8 dieron `medium`/`under_budget`. Lentes: `risk`, `resilience`, `reliability` — el driver escribe el ticket mergeado, decide la degradación cuando un lado no parsea, y su política la tienen que fijar los tests.
+
+Transacción: lineage `review-e1688d3581e64df5`, target `sha256:0a602cdb…`, 3 reviewers en paralelo (los tres con admisión `completed`), presupuesto de corrección **200 líneas sin usar** y **cero correcciones** (no hubo blockers). Veredicto: **approved**; el acknowledgement exacto quemó la autoridad (`gentle-ai.review-acknowledged/v1`, `authority: burned`). El boundary revisado queda en `fc7a2e4`.
+
+Esto **no** es una aprobación de entrega: mergear y publicar siguen siendo política ordinaria del repo.
+
+Findings — todos **informational / no bloqueantes**, quedan como trabajo posterior. Ninguno autoriza scope nuevo por sí solo:
+
+| id | lente | dónde | sev | qué dice |
+|----|-------|-------|-----|----------|
+| R1-1 | risk | `lib.rs:1596-1598` | WARNING | el comando del driver se arma concatenando la ruta del ejecutable dentro de un string con comillas dobles que git después ejecuta por shell: las comillas dobles no neutralizan `$`, backticks ni `$(...)`, así que un binario instalado en una ruta con sintaxis de shell haría correr un comando sustituido con los privilegios del usuario, o rompería el driver en silencio. |
+| R1-2 | risk | `main.rs:8-9`, `lib.rs:1647` | SUGGESTION | el subcomando `merge-driver` recibe tres paths del llamador y sobrescribe el segundo con el resultado: nada verifica que el target esté adentro del repo conectado o de `tickets_dir()` (el parseo limita qué archivos son alcanzables). |
+| R4-1 | resilience | `lib.rs:1887-1893`, `1539-1541` | WARNING | el registro del driver es best-effort: los fallos van sólo a stderr y se ignoran, y en el GUI empaquetado stderr no llega a ninguna consola, así que el merge vuelve al de git sin que nadie se entere. Falta verificación post-registro de que la regla de attributes matchee algo. |
+| R4-2 | resilience | `lib.rs:1661-1676`, `1814` | WARNING | si las dos puntas cambian el mismo campo escalar (status/title/priority) gana el `last_updated` más nuevo y el otro valor se descarta **sin registro** en ningún lado; el criterio de aceptación del plan (`multi-user-foundations.md:57-58`) pide que la elección sea determinística **y registrada**. Sólo los bodies dejan rastro visible. |
+| R4-3 | resilience | `lib.rs:1795-1801` | SUGGESTION | si las dos puntas editaron el body y una edición es sólo whitespace, esa edición se pierde: la garantía de "los dos bodies sobreviven" queda acotada a líneas no vacías. |
+| R3-001 | reliability | `lib.rs:1891-1893` | WARNING | el orden que la feature documenta como load-bearing (registrar el driver antes de cada pull) no está probado: sacar `ensure_merge_driver` de `git_pull` seguiría pasando la suite. |
+| R3-002 | reliability | `lib.rs:1668-1674` | WARNING | el mismo ganador escalar silencioso de R4-2 visto desde reliability: un merge parseable pero equivocado no deja rastro para detectarlo ni revertirlo. |
+| R3-003 | reliability | `lib.rs:1589`, `merge_driver_cli.rs` | SUGGESTION | la cobertura con git real sólo ejercita un ticket en la raíz del repo — justo el acoplamiento `MERGE_DRIVER_PATTERN` ↔ `tickets_dir()` que el propio código documenta como riesgo de fallo silencioso. |
 
 ## Riesgos
 
