@@ -444,6 +444,81 @@ fn with_authenticated_url(url: &str, pat: &str) -> String {
     }
 }
 
+/// `git -c` arguments that inject the credential into a single command.
+///
+/// A credentialed url handed to `git clone` or `git remote add` is persisted as
+/// `remote.origin.url`, which parks the token in plaintext in the clone's
+/// `.git/config`: it survives in backups, shows up in `git remote -v`, and
+/// travels with any copy of the directory. The stored remote stays
+/// credential-free instead, and each network command rewrites it to its
+/// credentialed form for its own duration using git's own mechanism.
+fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
+    // A local path or any other non-HTTP remote carries no credential to
+    // inject, and rewriting one would turn a working path into a broken url.
+    if !(config_url.starts_with("http://") || config_url.starts_with("https://")) {
+        return Vec::new();
+    }
+    let auth_url = with_authenticated_url(config_url, pat);
+    let clean_url = strip_userinfo(&auth_url);
+    vec![
+        "-c".to_string(),
+        format!("url.{}.insteadOf={}", auth_url, clean_url),
+    ]
+}
+
+/// The override for the active project. Best effort on purpose: with no
+/// connected project, no saved PAT, or a non-HTTP remote there is nothing to
+/// inject, and a command that needs no credential must not fail because of it.
+fn active_remote_override() -> Vec<String> {
+    let Ok(Some(config)) = read_git_config() else {
+        return Vec::new();
+    };
+    let Ok(pat) = load_pat() else {
+        return Vec::new();
+    };
+    credentialed_remote_override(&config.repo_url, &pat)
+}
+
+/// Whether a `git` invocation talks to the remote and therefore needs the
+/// credential. Keeping this list tight means local commands pay no keyring
+/// lookup.
+fn needs_credential(args: &[&str]) -> bool {
+    matches!(
+        args.first().copied(),
+        Some("fetch" | "pull" | "push" | "ls-remote" | "clone")
+    )
+}
+
+/// Rewrites a stored remote url that still carries userinfo to its clean form,
+/// repairing clones made before the credential was kept out of git's config.
+/// Returns whether the stored url had to be rewritten.
+fn strip_stored_userinfo(dir: &Path) -> bool {
+    let stored = match std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["remote", "get-url", "origin"])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => return false,
+    };
+    // Only HTTP(S) remotes carry a credential in their userinfo. In an SSH url
+    // the `git@host` is part of the addressing, and in a local path an `@` is
+    // just a character: "repairing" either one breaks a working remote.
+    if !(stored.starts_with("http://") || stored.starts_with("https://")) {
+        return false;
+    }
+    let clean = strip_userinfo(&stored);
+    if clean == stored {
+        return false;
+    }
+    std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["remote", "set-url", "origin", &clean])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn strip_userinfo(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let (scheme, rest) = url.split_at(scheme_end + 3);
@@ -500,6 +575,13 @@ async fn run_git(
         Some((n, e)) => build_git_cmd_with_user(dir, n, e),
         None => build_git_cmd(dir),
     };
+    // The credential is injected per command and never stored: see
+    // `credentialed_remote_override`.
+    if needs_credential(args) {
+        for a in active_remote_override() {
+            cmd.arg(a);
+        }
+    }
     for a in args {
         cmd.arg(a);
     }
@@ -519,6 +601,24 @@ async fn run_git(
         ));
     }
     Ok(stdout)
+}
+
+/// Runs one network command with the credential of a project that is not active
+/// yet. During setup the keyring entry and `config.json` are written *after* the
+/// clone, so `active_remote_override` cannot resolve them: there the override
+/// has to come from the values already in hand.
+async fn run_git_with_credential(
+    dir: &Path,
+    config_url: &str,
+    pat: &str,
+    args: &[&str],
+    timeout_secs: u64,
+    with_user: Option<(&str, &str)>,
+) -> Result<String, String> {
+    let override_args = credentialed_remote_override(config_url, pat);
+    let mut all: Vec<&str> = override_args.iter().map(|s| s.as_str()).collect();
+    all.extend_from_slice(args);
+    run_git(dir, &all, timeout_secs, with_user).await
 }
 
 async fn git_head(dir: &Path) -> Result<String, String> {
@@ -1404,6 +1504,8 @@ async fn setup_repo_inner(
     let remote_head = test.head_sha.clone().unwrap_or_default();
 
     let auth_url = with_authenticated_url(&config.repo_url, &pat);
+    // What goes into `.git/config`: the same remote, without the credential.
+    let clean_url = strip_userinfo(&auth_url);
 
     let is_git_repo = dir.join(".git").exists();
     let dir_is_empty = dir.exists()
@@ -1417,7 +1519,10 @@ async fn setup_repo_inner(
     if !dir.exists() || (dir_is_empty && !is_git_repo) {
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
         let mut cmd = Command::new("git");
-        cmd.arg("clone").arg(&auth_url).arg(&dir);
+        // Cloning through the credential override keeps the token out of the
+        // clone's `.git/config`, where a credentialed url would be persisted.
+        cmd.args(&credentialed_remote_override(&config.repo_url, &pat));
+        cmd.arg("clone").arg(&clean_url).arg(&dir);
         // Cloning someone's real repository can legitimately take minutes: one
         // with a committed node_modules runs to tens of thousands of files. The
         // old 60s cap killed the clone mid-checkout, which left a complete
@@ -1471,7 +1576,7 @@ async fn setup_repo_inner(
 
         let mut cmd = Command::new("git");
         cmd.current_dir(&dir);
-        cmd.args(&["remote", "add", "origin", &auth_url]);
+        cmd.args(&["remote", "add", "origin", &clean_url]);
         let status = timeout(Duration::from_secs(15), cmd.status())
             .await
             .map_err(|_| "git remote add timed out".to_string())?
@@ -1480,7 +1585,8 @@ async fn setup_repo_inner(
             return Err("git remote add failed".to_string());
         }
 
-        let output = run_git(&dir, &["fetch"], 300, None).await?;
+        let output =
+            run_git_with_credential(&dir, &config.repo_url, &pat, &["fetch"], 300, None).await?;
         let _ = output;
 
         let reset_main = run_git(&dir, &["reset", "--hard", "origin/main"], 60, None).await;
@@ -1503,10 +1609,18 @@ async fn setup_repo_inner(
             return Err("Data directory already initialized with a different repository. Please disconnect first.".to_string());
         }
 
-        run_git(&dir, &["fetch"], 300, None).await?;
+        // A clone made by an older build stored the credential in `.git/config`;
+        // repair it before touching the remote again.
+        if strip_stored_userinfo(&dir) {
+            eprintln!("[gitteam] removed a credential from the stored remote url");
+        }
 
-        let pull_status = run_git(
+        run_git_with_credential(&dir, &config.repo_url, &pat, &["fetch"], 300, None).await?;
+
+        let pull_status = run_git_with_credential(
             &dir,
+            &config.repo_url,
+            &pat,
             &["pull", "--rebase", "--autostash"],
             300,
             Some((&config.git_user_name, &config.git_user_email)),
@@ -1892,6 +2006,12 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
         eprintln!("[gitteam] could not configure the ticket merge driver: {}", e);
     }
 
+    // Same reason as the driver above: a clone made by an older build stored the
+    // credential in `.git/config`, and this is the run that clears it.
+    if strip_stored_userinfo(&dir) {
+        eprintln!("[gitteam] removed a credential from the stored remote url");
+    }
+
     run_git(&dir, &["fetch"], 300, None).await?;
 
     let count_output = run_git(&dir, &["log", "HEAD..@{u}", "--oneline"], 60, None)
@@ -2006,6 +2126,9 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     }
 
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
+    for a in active_remote_override() {
+        cmd.arg(a);
+    }
     if upstream_check.is_err() {
         cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
@@ -2168,6 +2291,9 @@ async fn git_commit_ticket(
 
     let mut push_cmd =
         build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
+    for a in active_remote_override() {
+        push_cmd.arg(a);
+    }
     if upstream_check.is_err() {
         push_cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
@@ -3891,6 +4017,249 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
                 .stdout
                 .is_empty(),
             "no unmerged path may be left behind"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_credential_override_skips_remotes_that_carry_no_credential() {
+        // A local board is supported, and a plain path is how this very suite
+        // talks to its remotes: rewriting one would turn it into a broken url.
+        assert!(credentialed_remote_override("/tmp/board.git", "tok").is_empty());
+        assert!(credentialed_remote_override("file:///tmp/board.git", "tok").is_empty());
+        assert!(credentialed_remote_override("ssh://git@github.com/a/b.git", "tok").is_empty());
+    }
+
+    #[test]
+    fn the_credential_override_matches_the_clean_url_and_never_the_token() {
+        let clean = "https://github.com/astivens/board.git";
+        let args = credentialed_remote_override(clean, "tok");
+        assert_eq!(args[0], "-c");
+        let rest = args[1]
+            .strip_prefix("url.")
+            .expect("the override must be a url.* config");
+        let (target, matched) = rest
+            .split_once(".insteadOf=")
+            .expect("the override must be an insteadOf rule");
+        // git substitutes `target` for `matched`: the credential is what reaches
+        // the network, and the credential-free url is what gets replaced.
+        assert!(target.contains("tok@"), "target: {}", target);
+        assert_eq!(matched, clean);
+    }
+
+    #[test]
+    fn git_reads_the_stored_remote_through_the_credential_override() {
+        // The mechanism this fix rests on: the stored remote stays clean and a
+        // single command reaches the credentialed url without writing anything.
+        // Real git, no network.
+        let dir = unique_temp_dir("cred-override");
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        let clean = "https://github.com/astivens/board.git";
+        git_in(&dir, &["remote", "add", "origin", clean]);
+
+        let plain = git_out(&dir, &["remote", "get-url", "origin"]);
+        assert_eq!(
+            String::from_utf8_lossy(&plain.stdout).trim(),
+            clean,
+            "the stored url must stay credential-free"
+        );
+
+        let override_args = credentialed_remote_override(clean, "tok");
+        let mut args: Vec<&str> = override_args.iter().map(|s| s.as_str()).collect();
+        args.extend_from_slice(&["remote", "get-url", "origin"]);
+        let credentialed = git_out(&dir, &args);
+        let out = String::from_utf8_lossy(&credentialed.stdout);
+        assert!(
+            out.contains("tok@"),
+            "with the override git must resolve the credentialed url, got: {}",
+            out
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_credential_left_in_the_stored_remote_url_is_removed() {
+        let dir = unique_temp_dir("cred-repair");
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://x-access-token:secret@github.com/astivens/board.git",
+            ],
+        );
+
+        assert!(
+            strip_stored_userinfo(&dir),
+            "a stored credential must be reported as rewritten"
+        );
+        let repaired = git_out(&dir, &["remote", "get-url", "origin"]);
+        assert_eq!(
+            String::from_utf8_lossy(&repaired.stdout).trim(),
+            "https://github.com/astivens/board.git"
+        );
+        assert!(
+            !strip_stored_userinfo(&dir),
+            "a clean remote must be left untouched"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    // S1 — real git: the clone argument reaches `.git/config`, never the
+    // substitution target, and the one-command rule is not persisted.
+    fn a_clone_through_the_override_stores_no_credential() {
+        let root = unique_temp_dir("clone-override");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let remote = root.join("remote.git");
+        git_in(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
+        let seed = root.join("seed");
+        git_in(
+            &root,
+            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+        );
+        fs::write(seed.join("README.md"), "board\n").unwrap();
+        git_in(&seed, &["add", "README.md"]);
+        git_in(&seed, &["commit", "-q", "-m", "init"]);
+        git_in(&seed, &["push", "-q", "origin", "HEAD"]);
+
+        let clean = "https://github.com/astivens/board.git";
+        for (name, redirect) in [
+            ("path", format!("url.{}.insteadOf={}", remote.display(), clean)),
+            (
+                "userinfo",
+                format!("url.file://x:tok@{}.insteadOf={}", remote.display(), clean),
+            ),
+        ] {
+            let dst = root.join(name);
+            git_in(
+                &root,
+                &["-c", &redirect, "clone", "-q", clean, dst.to_str().unwrap()],
+            );
+            let stored = git_out(&dst, &["remote", "get-url", "origin"]);
+            assert_eq!(
+                String::from_utf8_lossy(&stored.stdout).trim(),
+                clean,
+                "{}",
+                name
+            );
+            let config = fs::read_to_string(dst.join(".git/config")).unwrap();
+            assert!(
+                !config.contains("insteadOf"),
+                "the rule must not be persisted: {}",
+                config
+            );
+            assert!(
+                !config.contains("tok"),
+                "{} leaked a credential: {}",
+                name,
+                config
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    // S3 — the repair is a no-op for remotes that carry no credential in their
+    // userinfo, and for an SSH url where `git@host` is addressing, not a secret.
+    fn strip_stored_userinfo_leaves_non_http_remotes_alone() {
+        for (name, url) in [
+            ("path", "/tmp/plain-board.git"),
+            ("file", "file:///tmp/plain-board.git"),
+            ("ssh", "ssh://git@github.com/a/b.git"),
+        ] {
+            let dir = unique_temp_dir(&format!("keep-{}", name));
+            fs::create_dir_all(&dir).unwrap();
+            git_in(&dir, &["init", "-q"]);
+            git_in(&dir, &["remote", "add", "origin", url]);
+            assert!(!strip_stored_userinfo(&dir), "{} must not be rewritten", url);
+            let after = git_out(&dir, &["remote", "get-url", "origin"]);
+            assert_eq!(String::from_utf8_lossy(&after.stdout).trim(), url);
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    // S4 — a sync must never fail because there is nothing to repair.
+    fn strip_stored_userinfo_is_a_noop_without_an_origin() {
+        let dir = unique_temp_dir("cred-no-origin");
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        assert!(!strip_stored_userinfo(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    // S5 — only the commands that talk to the remote pay for a credential.
+    fn only_the_network_commands_pay_for_a_credential() {
+        for a in ["fetch", "pull", "push", "ls-remote", "clone"] {
+            assert!(needs_credential(&[a]), "{}", a);
+        }
+        for a in [
+            "status",
+            "log",
+            "merge",
+            "config",
+            "checkout",
+            "add",
+            "diff",
+            "show",
+            "rebase",
+            "reset",
+            "rev-parse",
+            "remote",
+        ] {
+            assert!(!needs_credential(&[a]), "{}", a);
+        }
+    }
+
+    #[test]
+    // S2 — the injected rule reaches the remote for fetch and push (real git,
+    // offline: a local bare repository stands in for the network).
+    fn the_override_reaches_the_remote_for_fetch_and_push() {
+        let root = unique_temp_dir("override-network");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let remote = root.join("remote.git");
+        git_in(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
+        let seed = root.join("seed");
+        git_in(
+            &root,
+            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+        );
+        fs::write(seed.join("README.md"), "board\n").unwrap();
+        git_in(&seed, &["add", "README.md"]);
+        git_in(&seed, &["commit", "-q", "-m", "init"]);
+        git_in(&seed, &["push", "-q", "origin", "HEAD"]);
+
+        let clean = "https://github.com/astivens/board.git";
+        let redirect = format!("url.{}.insteadOf={}", remote.display(), clean);
+        let work = root.join("work");
+        git_in(
+            &root,
+            &["-c", &redirect, "clone", "-q", clean, work.to_str().unwrap()],
+        );
+        git_in(&work, &["-c", &redirect, "fetch", "-q", "origin"]);
+        fs::write(work.join("TKT-1000-a.md"), "---\nid: TKT-1000\n---\n\nx\n").unwrap();
+        git_in(&work, &["add", "-A"]);
+        git_in(&work, &["commit", "-q", "-m", "ticket"]);
+        git_in(&work, &["-c", &redirect, "push", "-q", "origin", "HEAD"]);
+
+        let pushed = git_out(&remote, &["rev-parse", "HEAD"]);
+        let local = git_out(&work, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            String::from_utf8_lossy(&pushed.stdout),
+            String::from_utf8_lossy(&local.stdout),
+            "the push must have reached the remote through the override"
         );
 
         let _ = fs::remove_dir_all(&root);
