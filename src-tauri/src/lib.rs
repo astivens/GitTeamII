@@ -282,10 +282,11 @@ fn active_project() -> Result<Option<(String, PathBuf)>, String> {
     }
 }
 
-/// Resolve the data dir for the active project, falling back to the legacy
-/// `~/.gitteam-data/` when no multi-project is set up. All existing ticket and
-/// git commands use this so they automatically pick up the active project.
-fn data_dir() -> Result<PathBuf, String> {
+/// The git repository GitTeam works on for the active project, falling back to
+/// the legacy `~/.gitteam-data/` when no multi-project is set up. Every git
+/// invocation (clone, fetch, pull, push, status, commit) runs here, so this is
+/// the directory that has to contain `.git`.
+fn repo_root() -> Result<PathBuf, String> {
     if let Some((id, _)) = active_project()? {
         return project_repo_dir(&id);
     }
@@ -293,9 +294,30 @@ fn data_dir() -> Result<PathBuf, String> {
     Ok(home.join(".gitteam-data"))
 }
 
-fn ensure_data_dir() -> Result<PathBuf, String> {
-    let dir = data_dir()?;
+/// The directory that holds the ticket `.md` files.
+///
+/// Today this is always the repository root, so existing projects keep working
+/// unchanged. It stays a separate concept from `repo_root()` because a project
+/// may instead keep its tickets in a subdirectory of the repository
+/// (`tickets/`). Every ticket-file operation goes through this function so that
+/// change stays in one place.
+fn tickets_dir() -> Result<PathBuf, String> {
+    repo_root()
+}
+
+fn ensure_repo_root() -> Result<PathBuf, String> {
+    let dir = repo_root()?;
     fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    Ok(dir)
+}
+
+/// Create the ticket directory (`tickets_dir()`), parents included.
+fn ensure_tickets_dir() -> Result<PathBuf, String> {
+    let dir = tickets_dir()?;
+    fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
+    // Pre-Fase-6 layouts kept tickets in a `tickets/` subfolder that GitTeam no
+    // longer reads. This is ticket-layout guidance, so it belongs here and not
+    // on the git path. It goes away once `tickets_dir()` becomes a subfolder.
     let legacy = dir.join("tickets");
     if legacy.exists() && !dir.join(".git").exists() {
         eprintln!(
@@ -776,7 +798,7 @@ fn sort_tickets_desc(tickets: &mut [Ticket]) {
 
 #[tauri::command]
 fn init_data_dir() -> Result<String, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     Ok(dir.to_string_lossy().to_string())
 }
 
@@ -811,13 +833,13 @@ fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
 
 #[tauri::command]
 fn list_tickets() -> Result<Vec<Ticket>, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     load_all_tickets(&dir)
 }
 
 #[tauri::command]
 fn read_ticket_raw(filename: String) -> Result<String, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     let path = dir.join(&filename);
     if !path.exists() {
         return Err(format!("file not found: {}", filename));
@@ -827,7 +849,7 @@ fn read_ticket_raw(filename: String) -> Result<String, String> {
 
 #[tauri::command]
 fn create_ticket(input: CreateTicketInput) -> Result<Ticket, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     let title = input.title.trim();
     if title.is_empty() {
         return Err("title is required".to_string());
@@ -861,7 +883,7 @@ fn create_ticket(input: CreateTicketInput) -> Result<Ticket, String> {
 
 #[tauri::command]
 fn update_ticket(filename: String, input: CreateTicketInput) -> Result<Ticket, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     let path = dir.join(&filename);
     if !path.exists() {
         return Err(format!("file not found: {}", filename));
@@ -900,7 +922,7 @@ fn update_ticket(filename: String, input: CreateTicketInput) -> Result<Ticket, S
 
 #[tauri::command]
 fn delete_ticket(filename: String) -> Result<(), String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     let path = dir.join(&filename);
     if !path.exists() {
         return Err(format!("file not found: {}", filename));
@@ -963,7 +985,7 @@ fn unlink_in_dir(dir: &Path, from: &str, to: &str) -> Result<Ticket, String> {
 /// undirected edge.
 #[tauri::command]
 fn link_tickets(from: String, to: String) -> Result<Ticket, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
     link_in_dir(&dir, &from, &to)
@@ -971,7 +993,7 @@ fn link_tickets(from: String, to: String) -> Result<Ticket, String> {
 
 #[tauri::command]
 fn unlink_tickets(from: String, to: String) -> Result<Ticket, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
     unlink_in_dir(&dir, &from, &to)
@@ -1007,7 +1029,7 @@ fn build_edges(tickets: &[Ticket]) -> Vec<GraphEdge> {
 
 #[tauri::command]
 fn get_graph() -> Result<Graph, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_tickets_dir()?;
     let tickets = load_all_tickets(&dir)?;
 
     let nodes: Vec<GraphNode> = tickets
@@ -1038,7 +1060,7 @@ async fn git_get_config() -> Result<Option<GitConfig>, String> {
 async fn git_save_config(config: GitConfig, pat: String) -> Result<(), String> {
     save_pat(&pat)?;
     write_git_config(&config)?;
-    let dir = data_dir()?;
+    let dir = repo_root()?;
     if dir.join(".git").exists() {
         let _ = run_git(
             &dir,
@@ -1131,7 +1153,7 @@ async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionR
 
 #[tauri::command]
 async fn git_setup_repo(config: GitConfig, pat: String) -> Result<SetupResult, String> {
-    let dir = data_dir()?;
+    let dir = repo_root()?;
     setup_repo_inner(dir, config, pat).await
 }
 
@@ -1337,7 +1359,7 @@ async fn setup_repo_inner(
 
 #[tauri::command]
 async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository. Please reconnect.".to_string());
     }
@@ -1396,7 +1418,7 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
 
 #[tauri::command]
 async fn git_push(config: GitConfig) -> Result<PushResult, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository. Please reconnect.".to_string());
     }
@@ -1541,7 +1563,7 @@ async fn git_commit_ticket(
     action: String,
     config: GitConfig,
 ) -> Result<CommitResult, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository. Please reconnect.".to_string());
     }
@@ -1634,7 +1656,7 @@ async fn git_commit_ticket(
 
 #[tauri::command]
 async fn git_status() -> Result<GitStatus, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository.".to_string());
     }
@@ -1678,7 +1700,7 @@ async fn git_status() -> Result<GitStatus, String> {
 /// files as deleted — from being swept into ticket commits and pushed.
 #[tauri::command]
 async fn git_list_local_changes() -> Result<Vec<String>, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Ok(vec![]);
     }
@@ -1701,7 +1723,7 @@ async fn git_list_local_changes() -> Result<Vec<String>, String> {
 /// no conflicts (or we are not in a rebase/merge state).
 #[tauri::command]
 async fn git_list_conflicts() -> Result<Vec<String>, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Ok(vec![]);
     }
@@ -1721,7 +1743,7 @@ async fn git_list_conflicts() -> Result<Vec<String>, String> {
 /// that version (e.g. it was deleted on the other side).
 #[tauri::command]
 async fn git_read_conflict_version(filename: String, version: String) -> Result<String, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository.".to_string());
     }
@@ -1748,7 +1770,7 @@ async fn git_read_conflict_version(filename: String, version: String) -> Result<
 /// one was created, empty string otherwise.
 #[tauri::command]
 async fn git_resolve_conflict(filename: String, resolution: String) -> Result<String, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository.".to_string());
     }
@@ -1814,7 +1836,7 @@ async fn git_resolve_conflict(filename: String, resolution: String) -> Result<St
 /// Returns the new HEAD SHA. Errors out when not in a rebase/merge state.
 #[tauri::command]
 async fn git_finish_resolution() -> Result<String, String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository.".to_string());
     }
@@ -1860,7 +1882,7 @@ async fn git_finish_resolution() -> Result<String, String> {
 /// Abort an in-progress rebase or merge. No-op when not in either state.
 #[tauri::command]
 async fn git_abort_resolution() -> Result<(), String> {
-    let dir = ensure_data_dir()?;
+    let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository.".to_string());
     }
@@ -1913,7 +1935,7 @@ async fn git_start_watcher(
         let mut is_first_iteration = true;
         loop {
             // Check that data dir exists and is a git repo
-            let dir = match data_dir() {
+            let dir = match repo_root() {
                 Ok(d) => d,
                 Err(_) => {
                     eprintln!("[gitteam watcher] no data dir, sleeping 30s");
