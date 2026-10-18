@@ -78,7 +78,7 @@ Runner: `cd src-tauri && cargo test` · `npx tsc --noEmit` · `pnpm build`.
 |----|-------|-----|------|--------|--------|
 | T1 | S5 | Separar `repo_root()` (git: `.git`, clone/fetch/pull/push/status) de `tickets_dir()` (los `.md`). 13 call sites de git, 9 de archivos de ticket. | inline | hecho | `06b5c04` |
 | T2 | S2 | `uid` (ULID) en frontmatter + renumeración al merge + reescritura de `links`. | inline | hecho | `ec01beb` |
-| T3 | S3 | Merge driver propio: segundo entry point `merge-driver` del binario, política campo por campo (tags/links unidos, `uid` más viejo, cuerpos con las líneas compartidas escritas una vez), registro idempotente en `.git/info/attributes` + `.git/config` al conectar y antes de cada pull, degradación a conflicto normal. | inline | hecho (riesgo: **item 1**, formato persistido) | este commit |
+| T3 | S3 | Merge driver propio: segundo entry point `merge-driver` del binario, política campo por campo (tags/links unidos, `uid` más viejo, cuerpos con las líneas compartidas escritas una vez), registro idempotente en `.git/info/attributes` + `.git/config` al conectar y antes de cada pull, degradación a conflicto normal. | inline | hecho (riesgo: **item 1**, formato persistido) | `6e0db8e` |
 | T4 | S2 | Prueba real de dos clones offline con git de verdad (repo bare local, fuera del workspace). | inline | hecho | `d080b63` |
 
 Regla de ruta: un solo cambio entendido por vez, inline (el Writer trigger no aplica: no hay
