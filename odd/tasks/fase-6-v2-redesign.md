@@ -44,6 +44,27 @@ Los `S#` son el contrato. Donde el texto original del pedido está disponible se
 
 Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (no hubo unidades paralelas independientes ni backstop de contexto), ni el de verificación independiente (no hay ítem de alto riesgo nuevo con verificación independiente pendiente; ver `Risk` abajo).
 
+## Delivery (cadena de PRs)
+
+Estrategia elegida con la decisión delegada por el usuario (`"Como gustes"`): **Stacked PRs to main**, en 8 slices. La historia es lineal y compartida, así que cada slice es un branch apuntando a su último commit y el diff de cada PR es exactamente un slice — sin rebase, sin reescritura, sin diffs contaminados. Se mergea **en orden y con merge commit** (nunca squash: el squash haría reaparecer los commits del slice anterior en el diff del siguiente).
+
+| # | Rama | Base | Commits | Líneas (+/−) | Boundary |
+|---|------|------|---------|--------------|----------|
+| 1 | `feat/01-design-system-v2` | `main` | 5 (`876d2c8`→`d9c8dc8`) | 1516+901 = 2417 | cargo test OK · tsc OK |
+| 2 | `feat/02-multi-project` | `feat/01-…` | 4 (`9178648`→`52709ca`) | 1104+104 = 1208 | cargo test OK · tsc OK |
+| 3 | `feat/03-ticket-graph` | `feat/02-…` | 6 (`31d19d1`→`58fa26d`) | 1552+149 = 1701 | cargo test OK (13) · tsc OK |
+| 4 | `feat/04-sync-ownership` | `feat/03-…` | 1 (`6baefef`) | 245+25 = **270** | cargo test OK (17) · tsc OK |
+| 5 | `feat/05-tickets-dir-seam` | `feat/04-…` | 2 (`998c011`, `06b5c04`) | 150+28 = **178** | cargo test OK (17) · tsc OK |
+| 6 | `feat/06-ticket-identity` | `feat/05-…` | 2 (`ec01beb`, `d080b63`) | 658+16 = 674 | cargo test OK (29) · tsc OK |
+| 7 | `feat/07-merge-driver` | `feat/06-…` | 4 (`dbc7e37`→`fc7a2e4`) | 1063+19 = 1082 | cargo test OK (42) · tsc OK |
+| 8 | `feat/08-theme-hygiene` | `feat/07-…` | 3 (`d366726`→`d50ad25`) + el doc del corte (`52f969b`) | 130+6 = **136** (+26 de doc = 162) | cargo test OK (42) · tsc OK |
+
+Verificación de boundaries: `cargo test` + `npx tsc --noEmit` sobre cada tip en un worktree aislado (con `main` como control) — **9/9 verdes**. Script: `/tmp/opencode/gitteam-chain-verify.sh`.
+
+Overage honesto (una sola pasada de corte, como manda el skill `chained-pr`): los slices 1, 2, 3, 6 y 7 exceden el presupuesto de 400 líneas y **no hay corte cohesivo que los baje** — el slice 1 es un port mecánico de 24 archivos que no compila a medias, el 2 y el 3 son backend + la UI que lo consume, el 6 es la feature con su test de prueba y el 7 es un solo mecanismo. Recomendación: `size:exception` para esos cinco. Los slices 4, 5 y 8 entran en presupuesto.
+
+Los bodies de los 8 PR (con el `## Chain Context` que pide el skill) están en `/tmp/opencode/gitteam-prs/`, y el script que publica todo —push de las 9 ramas + los 8 PR— en `/tmp/opencode/gitteam-prs/open-chain.sh`. **Publicar es decisión del humano**: el script no se corrió.
+
 ## Riesgos
 
 - **Frontmatter es dato persistido** (ítem 1): cambiar el render podía reescribir cualquier ticket. Mitigado con `links` emitido **solo cuando no está vacío** y tests de no-regresión para el caso sin links y para archivos legacy.
@@ -89,6 +110,9 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
   Decisión: la elección de tema es preferencia **local de la máquina** (localStorage), no viaja en el repo ni en el frontmatter de los tickets — así no toca ningún formato persistido. El default sigue siendo `default` (dark); no se sniffea `prefers-color-scheme` porque el criterio era que el light sea activable desde la UI.
   Verificación: `npx tsc --noEmit` limpio; `pnpm build` OK (mismo warning de chunk >500 kB, preexistente); chequeo estructural de que cada entrada de `THEMES` tenga su bloque `[data-theme="…"]` en `index.css` (3/3). El frontend no tiene runner de tests (no hay vitest/jest en `package.json`), así que no hay RED/GREEN posible en JS: la comprobación es tsc + build + lectura, y **queda pendiente la pasada visual manual** (`pnpm tauri dev`) para los 3 temas.
   `Risk: none` — no toca datos persistidos de tickets ni contratos de comandos; la clave nueva de `localStorage` es local y opcional.
+- **L11 (2026-10-18)** — Pregunta al usuario: preparar el corte en PRs encadenados o seguir con producto. Respuesta verbatim: *"Como gustes"* → decisión delegada. Se eligió **publicar en formato revisable en vez de seguir agregando features**: la rama acumula 28 commits y ~7700 líneas (adición + borrado) y existe **sólo en este disco**, así que el riesgo dominante no era la falta de features sino que todo el trabajo (incluido el fix del sync destructivo) no está publicado en ningún lado.
+  Corte en 8 slices con una sola pasada honesta (skill `chained-pr`): ramas `feat/01..08`, cada una apuntando al último commit de su rango contiguo, con el diff de cada PR = exactamente un slice. 9 boundaries verificados en worktree aislado (`cargo test` + `tsc`), 9/9 verdes, con `main` como control (que tiene 0 tests: la suite arranca en el slice 3).
+  Pendiente y **gated al humano**: el push de las 9 ramas y la creación de los 8 PR (`open-chain.sh`), porque push y PR siguen siendo decisiones del usuario bajo política ordinaria del repo.
 
 ## Criterios de aceptación
 

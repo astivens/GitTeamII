@@ -7,6 +7,8 @@ produce ids duplicados y merges conflictivos en archivos que nadie puede arregla
 Rama: `fase-6-v2-redesign` (local, sin push). Delivery strategy: `ask-on-risk`.
 Runner: `cd src-tauri && cargo test` · `npx tsc --noEmit` · `pnpm build`.
 
+Delivery: este plan viaja en los slices 5, 6 y 7 de la cadena de PRs del branch (ver `fase-6-v2-redesign.md` → `## Delivery`): `feat/05-tickets-dir-seam` (T1), `feat/06-ticket-identity` (T2, T4) y `feat/07-merge-driver` (T3).
+
 ## Specs
 
 - **S1 — El transporte es git, y la promesa es asíncrona.**
