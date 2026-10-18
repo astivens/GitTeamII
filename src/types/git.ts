@@ -43,6 +43,18 @@ export interface PullResult {
   head_sha: string;
   files_changed: string[];
   commits_pulled: number;
+  /** Display ids the pull had to renumber, so the app can report them. */
+  renamed_ids: IdRename[];
+}
+
+/**
+ * A repaired id collision: two people created the same display id offline and
+ * the older ticket kept it.
+ */
+export interface IdRename {
+  from: string;
+  to: string;
+  filename: string;
 }
 
 export interface PushResult {
