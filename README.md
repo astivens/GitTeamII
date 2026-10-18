@@ -38,7 +38,7 @@ pnpm build:windows  # NSIS + MSI
 | Multi-project | Each repository gets its own local checkout and its own keyring entry. Switch boards from the header (⌘K · `g k` for the board, `g g` for the graph) |
 | Ticket graph | Link tickets with `links: ["TKT-1039"]` in frontmatter and explore them in an Obsidian-style force graph. Hover highlights neighbours, drag moves a node, click opens the ticket |
 | Views | Board and Graph, toggled from the header. `Y` copies the ticked-off ticket ID anywhere |
-| Themeable | All colors, type and spacing come from CSS custom properties. `default`, `light` and `obsidian` token sets ship in `src/index.css` |
+| Themeable | All colors, type and spacing come from CSS custom properties. `default`, `light` and `obsidian` token sets ship in `src/index.css` and are switchable from the header; the choice is remembered locally |
 | Zero telemetry | No analytics, no remote calls outside your configured repo |
 
 ## Architecture
