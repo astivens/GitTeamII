@@ -3018,4 +3018,121 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         assert_eq!(kept.uid, None);
         let _ = fs::remove_dir_all(&dir);
     }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=GitTeam Test"])
+            .args(["-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git could not be started");
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}{}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn two_clones_that_created_the_same_id_converge_after_a_real_merge() {
+        // The end-to-end case this whole scheme exists for, driven through real
+        // git: a bare repository the test owns (so it is genuinely offline), two
+        // clones, and one ticket created in each while they cannot see each
+        // other. Both land on TKT-1000.
+        let root = unique_temp_dir("two-clones");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let remote = root.join("remote.git");
+        git_in(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
+
+        let seed = root.join("seed");
+        git_in(&root, &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()]);
+        fs::write(seed.join("README.md"), "board\n").unwrap();
+        git_in(&seed, &["add", "README.md"]);
+        git_in(&seed, &["commit", "-q", "-m", "init"]);
+        git_in(&seed, &["push", "-q", "origin", "HEAD"]);
+
+        let alice = root.join("alice");
+        let bob = root.join("bob");
+        for who in [&alice, &bob] {
+            git_in(&root, &["clone", "-q", remote.to_str().unwrap(), who.to_str().unwrap()]);
+        }
+
+        // Alice goes first so her uid is the older one.
+        let alice_ticket = create_ticket_in(&alice, create_input("Shared board")).unwrap();
+        assert_eq!(alice_ticket.id, "TKT-1000");
+        git_in(&alice, &["add", "-A"]);
+        git_in(&alice, &["commit", "-q", "-m", "alice ticket"]);
+        git_in(&alice, &["push", "-q"]);
+
+        // Bob was working offline: same id, different ticket, and his own
+        // second ticket already points at it.
+        let bob_ticket = create_ticket_in(&bob, create_input("Bob's ticket")).unwrap();
+        assert_eq!(bob_ticket.id, "TKT-1000", "the collision must be reproduced");
+        let bob_second = create_ticket_in(&bob, create_input("Bob's follow-up")).unwrap();
+        assert_eq!(bob_second.id, "TKT-1001");
+        link_in_dir(&bob, "TKT-1001", "TKT-1000").unwrap();
+        git_in(&bob, &["add", "-A"]);
+        git_in(&bob, &["commit", "-q", "-m", "bob tickets"]);
+
+        // Different filenames, so the merge itself is clean and git reports no
+        // conflict: the two files simply coexist, both claiming TKT-1000.
+        git_in(&bob, &["pull", "-q", "--rebase", "--autostash"]);
+        let after_merge = load_all_tickets(&bob).unwrap();
+        assert_eq!(
+            after_merge.iter().filter(|t| t.id == "TKT-1000").count(),
+            2,
+            "the merge should leave two tickets claiming TKT-1000"
+        );
+
+        // Alice's ticket is older, so she keeps the id.
+        let renames = reconcile_ticket_ids_in(&bob).unwrap();
+        assert_eq!(renames.len(), 1, "{:?}", renames);
+        assert_eq!(renames[0].from, "TKT-1000");
+        assert_eq!(renames[0].to, "TKT-1002");
+
+        let bob_dir_id = load_all_tickets(&bob)
+            .unwrap()
+            .iter()
+            .find(|t| t.uid == bob_ticket.uid)
+            .map(|t| t.id.clone())
+            .unwrap();
+        assert_eq!(bob_dir_id, "TKT-1002", "Bob's ticket was the one renumbered");
+        let referrer = parse_ticket_file(&find_ticket_path_by_id(&bob, "TKT-1001").unwrap()).unwrap();
+        assert_eq!(
+            referrer.links,
+            vec!["TKT-1002".to_string()],
+            "Bob's own reference followed his ticket"
+        );
+
+        // The repair propagates, and the other clone agrees without having to
+        // change anything of its own.
+        git_in(&bob, &["add", "-A"]);
+        git_in(&bob, &["commit", "-q", "-m", "repair colliding ids"]);
+        git_in(&bob, &["push", "-q"]);
+        git_in(&alice, &["pull", "-q", "--rebase", "--autostash"]);
+
+        assert!(
+            reconcile_ticket_ids_in(&alice).unwrap().is_empty(),
+            "Alice must not renumber anything after her pull"
+        );
+        let alice_view = load_all_tickets(&alice).unwrap();
+        assert_eq!(alice_view.len(), 3);
+        assert_eq!(
+            alice_view.iter().filter(|t| t.id == "TKT-1000").count(),
+            1,
+            "exactly one ticket owns TKT-1000 once both clones converged"
+        );
+        // Alice's ticket is untouched and still hers.
+        let alice_now = alice_view.iter().find(|t| t.uid == alice_ticket.uid).unwrap();
+        assert_eq!(alice_now.id, "TKT-1000");
+        assert_eq!(alice_now.filepath, alice_ticket.filepath);
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
