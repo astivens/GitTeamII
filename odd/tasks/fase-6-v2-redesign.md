@@ -39,7 +39,7 @@ Los `S#` son el contrato. Donde el texto original del pedido está disponible se
 | T9 | S8 | `GraphView` + toggle Board/Graph + editor de links en el modal | inline | hecho | `8168f16` |
 | T10 | S7 | Tests de `link_in_dir`/`unlink_in_dir` sobre archivos | inline | hecho | `fd05e12` |
 | T11 | S1–S8 | Actualizar feature doc y README | inline | hecho | `576f7a2`, `aea4e09` |
-| T12 | S1 | Toggle de tema en la UI (`data-theme`) | — | **pendiente** | — |
+| T12 | S1 | Toggle de tema en la UI (`data-theme`) | inline | hecho | `c055af4` |
 | T13 | S6 | **Fix sync destructivo**: GitTeam nunca commitea/pushea archivos que no son tickets; timeouts realistas; rechazo de checkouts incompletos | inline | hecho | (este commit) |
 
 Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (no hubo unidades paralelas independientes ni backstop de contexto), ni el de verificación independiente (no hay ítem de alto riesgo nuevo con verificación independiente pendiente; ver `Risk` abajo).
@@ -52,7 +52,8 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
 
 ## Gaps conocidos
 
-- **Toggle de tema**: los tokens `[data-theme="default"|"light"|"obsidian"]` existen y están listos, pero **nada setea `data-theme` todavía**. El criterio "Light theme funcional" está a medias: falta la UI (issue P1-13 del audit). No se implementó acá porque no fue pedido en esta sesión.
+- **Temas autorables por el usuario**: el picker cubre los tres sets que trae el binario (`default`, `light`, `obsidian`). Cargar un set propio desde disco sigue pendiente — es parte de la visión del producto, no de T12.
+- **Preferencias de UI no persistidas**: el tema se recuerda en `localStorage` (`gitteam.theme`), pero `viewMode` sigue sin persistir (vuelve a board en cada arranque).
 - **Sync state por proyecto**: `syncStatus` sigue siendo global, no por proyecto.
 - **Cursor blink en el editor markdown**: necesita un contenteditable propio; diferido.
 - **`G L`/`G K`/`G A`**: las vistas List/Analytics no existen. Se implementó `g k` (board) y `g g` (graph) — desvío deliberado y honesto respecto del plan original.
@@ -81,12 +82,19 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
   Arreglado en T13: `git_list_local_changes` devuelve **sólo** archivos de ticket; `git_commit_ticket` rechaza cualquier path ajeno y commitea únicamente ese archivo (`git commit -- <path>`); `git_push` difea el rango exacto que publicaría (`upstream...HEAD`) y rechaza si toca algo que no es un ticket; clone 900s + limpieza del directorio si falla; presupuestos de fetch/pull/push/add/commit/status de 60-300s; y `setup_repo_inner` valida que el worktree tenga los archivos rastreados antes de aceptar el proyecto.
   Recuperación aplicada sobre el checkout real: `git reset` (reconstruye el índice desde HEAD) + `git restore --worktree` (materializa los 504 faltantes). Quedó limpio, con los 2 tickets como untracked y el remoto intacto.
 - **L9 (2026-10-17)** — Decisión abierta (requiere al usuario): un repo de aplicación no es un repo de tickets. GitTeam fue diseñado asumiendo un repo dedicado a tickets; linkear el repo real de la app hace que los commits `ticket: ...` aterricen en `main` de la aplicación. Opciones: (a) repo dedicado de tickets (recomendado), (b) tickets en un subdirectorio del repo de la app, (c) otra política. Sin respuesta todavía.
+- **L10 (2026-10-18)** — Reporte verbatim: *"Antes de eso, asegura que el gitignore esté completo, no quiero ver el rdd en el repo, por ejemplo, luego de eso puedes continuar"*.
+  Auditoría: `.atl/` ya estaba ignorado; se agregaron `.codegraph/` (el índice local de CodeGraph sí aparecía como untracked), `.gentle-ai/`, `.gentle-ai-review-index-*` y `reviews/`. Verificado con `git check-ignore -v` sobre rutas sintéticas de cada regla, y `git ls-files` no muestra nada de RDD/atl/review en `HEAD`.
+  Dato honesto: `.atl/skill-registry.md` y su cache **estuvieron** commiteados en `a3d184a` y se removieron en `d9c8dc8`; siguen existiendo en la historia. Sacarlos de ahí es reescribir historia (`filter-repo`) y no se hizo sin pedido explícito.
+  T12 implementado: la lista de temas vive en `src/lib/theme.ts` (`THEMES`, labels y persistencia) como única fuente; el store expone `theme` + `setTheme` (misma forma que `viewMode`); `setTheme` aplica `data-theme` a `<html>`, lo persiste en `localStorage` (`gitteam.theme`) y actualiza el estado; `main.tsx` aplica el tema recordado **antes** del primer render para que no haya flash. El control en el header reusa el componente `.view-toggle` (`Dark | Light | Obsidian`, iconos, `aria-pressed`, tooltips), sin CSS nuevo.
+  Decisión: la elección de tema es preferencia **local de la máquina** (localStorage), no viaja en el repo ni en el frontmatter de los tickets — así no toca ningún formato persistido. El default sigue siendo `default` (dark); no se sniffea `prefers-color-scheme` porque el criterio era que el light sea activable desde la UI.
+  Verificación: `npx tsc --noEmit` limpio; `pnpm build` OK (mismo warning de chunk >500 kB, preexistente); chequeo estructural de que cada entrada de `THEMES` tenga su bloque `[data-theme="…"]` en `index.css` (3/3). El frontend no tiene runner de tests (no hay vitest/jest en `package.json`), así que no hay RED/GREEN posible en JS: la comprobación es tsc + build + lectura, y **queda pendiente la pasada visual manual** (`pnpm tauri dev`) para los 3 temas.
+  `Risk: none` — no toca datos persistidos de tickets ni contratos de comandos; la clave nueva de `localStorage` es local y opcional.
 
 ## Criterios de aceptación
 
 - [x] Tailwind removido completamente
 - [x] CSS custom properties definidas y themeables vía `[data-theme]`
-- [ ] Light theme **activable** desde la UI — tokens listos, toggle pendiente (T12)
+- [x] Light theme **activable** desde la UI (T12: picker `Dark | Light | Obsidian` en el header, `data-theme` en `<html>`, elección recordada en `localStorage`)
 - [x] Brand "gitteam" + monograma visible en el header
 - [x] Copy de TKT IDs con feedback (botón Y en la tarjeta + atajo global `Y`)
 - [x] Motion signatures (sync pulse, new ticket glow)
@@ -102,4 +110,4 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
 
 - Design System en OpenPencil: tab-1 page `611929921:17`
 - Memory: topic `design-system-v2` (decisiones de diseño), topic `fase-6-v2-redesign` (implementación)
-- `ui-ux-audit.md`: P0-3 (side panel), P1-9 (markdown preview), P1-13 (theme toggle — abierto)
+- `ui-ux-audit.md`: P0-3 (side panel), P1-9 (markdown preview), P1-13 (theme toggle — resuelto en T12)
