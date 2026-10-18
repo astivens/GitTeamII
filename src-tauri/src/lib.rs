@@ -1533,6 +1533,13 @@ async fn setup_repo_inner(
         ));
     }
 
+    // The merge driver is clone-local configuration, so it is set up wherever a
+    // project is connected. Failing here is not fatal: without the driver the
+    // same merge produces git's normal conflict, which the app can resolve.
+    if let Err(e) = ensure_merge_driver(&dir).await {
+        eprintln!("[gitteam] could not configure the ticket merge driver: {}", e);
+    }
+
     save_pat(&pat)?;
 
     let mut config_to_save = config.clone();
@@ -1567,11 +1574,322 @@ async fn setup_repo_inner(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Merge driver
+// ---------------------------------------------------------------------------
+
+/// The name git knows the ticket merge driver by, in the attributes file and in
+/// the `[merge "..."]` config section.
+const MERGE_DRIVER_NAME: &str = "gitteam-ticket";
+
+/// The files the driver is registered for, relative to the repository root.
+/// GitTeam only ever owns tickets, so the pattern names exactly those and
+/// nothing else a repository may contain. It has to move together with
+/// `tickets_dir()` if tickets ever live in a subdirectory.
+const MERGE_DRIVER_PATTERN: &str = "TKT-*.md";
+
+/// The command git runs when both sides changed the same ticket: this same
+/// binary, told where the three versions are.
+///
+/// Separators are forward slashes even on Windows because git hands the command
+/// to a shell, where a backslash is an escape character.
+fn merge_driver_command(exe: &Path) -> String {
+    let exe = exe.to_string_lossy().replace('\\', "/");
+    format!("\"{}\" merge-driver %O %A %B", exe)
+}
+
+/// Entry point for the `merge-driver` argument. The exit code is the answer:
+/// git reads 0 as "merged, `%A` holds the result" and anything else as "could
+/// not merge", on which it falls back to its own merge and leaves a normal
+/// conflict. Falling back is always safe, which is why every uncertainty here
+/// ends in an error instead of a guess.
+pub fn merge_driver_main(args: &[String]) -> i32 {
+    if args.len() < 3 {
+        eprintln!("[gitteam] merge-driver expects three paths: <base> <ours> <theirs>");
+        return 1;
+    }
+    match merge_ticket_versions(Path::new(&args[0]), Path::new(&args[1]), Path::new(&args[2])) {
+        Ok(()) => 0,
+        Err(e) => {
+            // stderr reaches the terminal of whoever ran the merge.
+            eprintln!("[gitteam] leaving this conflict to git: {}", e);
+            1
+        }
+    }
+}
+
+/// Merge the two sides of a ticket into `ours`, the path git reads the result
+/// from.
+///
+/// `base` is empty when the two sides share no ancestor, which is an add/add:
+/// the same filename created in two clones. That is a merge without history,
+/// not a failure.
+fn merge_ticket_versions(base: &Path, ours: &Path, theirs: &Path) -> Result<(), String> {
+    let base_text =
+        fs::read_to_string(base).map_err(|e| format!("could not read {}: {}", base.display(), e))?;
+
+    // A side we cannot parse is a side we must not merge: git's own conflict is
+    // strictly better than a file we invented.
+    let ours_ticket =
+        parse_ticket_file(ours).map_err(|e| format!("could not parse {}: {}", ours.display(), e))?;
+    let theirs_ticket = parse_ticket_file(theirs)
+        .map_err(|e| format!("could not parse {}: {}", theirs.display(), e))?;
+    let base_ticket = if base_text.trim().is_empty() {
+        None
+    } else {
+        Some(
+            parse_ticket_file(base)
+                .map_err(|e| format!("could not parse {}: {}", base.display(), e))?,
+        )
+    };
+
+    let merged = merge_ticket_versions_of(base_ticket.as_ref(), &ours_ticket, &theirs_ticket);
+    atomic_write(ours, &render_frontmatter(&merged))
+}
+
+/// Merge two versions of the same ticket, given their common ancestor when
+/// there is one.
+///
+/// Per field it is the usual three-way rule: if both sides agree, that is the
+/// value; if one side differs from the base, that side changed it; if both
+/// changed it, the newer edit wins. Tags and links add a union to that rule,
+/// because losing a tag or a reference is worse than keeping one somebody
+/// removed. The body concatenates, so no text disappears.
+fn merge_ticket_versions_of(base: Option<&Ticket>, ours: &Ticket, theirs: &Ticket) -> Ticket {
+    let theirs_newer = theirs.last_updated > ours.last_updated;
+
+    let scalar = |base_value: Option<&str>, a: &str, b: &str| -> String {
+        if a == b {
+            return a.to_string();
+        }
+        match base_value {
+            Some(o) if o == a => b.to_string(),
+            Some(o) if o == b => a.to_string(),
+            _ => {
+                if theirs_newer {
+                    b.to_string()
+                } else {
+                    a.to_string()
+                }
+            }
+        }
+    };
+
+    // The empty string stands in for "unset" so that clearing a field is one
+    // more value to merge like any other.
+    let optional = |base_value: Option<&str>, a: &str, b: &str| -> Option<String> {
+        let picked = scalar(base_value, a, b);
+        if picked.is_empty() {
+            None
+        } else {
+            Some(picked)
+        }
+    };
+
+    let list = |base_value: &[String], a: &[String], b: &[String]| -> Vec<String> {
+        if a == b {
+            return a.to_vec();
+        }
+        if base_value == a {
+            return b.to_vec();
+        }
+        if base_value == b {
+            return a.to_vec();
+        }
+        // Both sides changed it: keep both, ours first, without repeats.
+        let mut out = a.to_vec();
+        for item in b {
+            if !out.contains(item) {
+                out.push(item.clone());
+            }
+        }
+        out
+    };
+
+    Ticket {
+        id: scalar(base.map(|t| t.id.as_str()), &ours.id, &theirs.id),
+        // Identity never changes, so two identities meeting at one file keep the
+        // older one - the rule `reconcile_ticket_ids_in` uses for a collision -
+        // rather than letting a clock decide who a ticket is.
+        uid: match (&ours.uid, &theirs.uid) {
+            (Some(a), Some(b)) if a != b => Some(if a < b { a.clone() } else { b.clone() }),
+            (Some(a), _) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        },
+        title: scalar(base.map(|t| t.title.as_str()), &ours.title, &theirs.title),
+        status: scalar(
+            base.map(|t| t.status.as_str()),
+            &ours.status,
+            &theirs.status,
+        ),
+        assignee: optional(
+            base.and_then(|t| t.assignee.as_deref()),
+            ours.assignee.as_deref().unwrap_or(""),
+            theirs.assignee.as_deref().unwrap_or(""),
+        ),
+        priority: scalar(
+            base.map(|t| t.priority.as_str()),
+            &ours.priority,
+            &theirs.priority,
+        ),
+        tags: list(
+            base.map(|t| t.tags.as_slice()).unwrap_or(&[]),
+            &ours.tags,
+            &theirs.tags,
+        ),
+        links: list(
+            base.map(|t| t.links.as_slice()).unwrap_or(&[]),
+            &ours.links,
+            &theirs.links,
+        ),
+        last_updated: scalar(
+            base.map(|t| t.last_updated.as_str()),
+            &ours.last_updated,
+            &theirs.last_updated,
+        ),
+        body: merge_bodies(base.map(|t| t.body.as_str()), &ours.body, &theirs.body),
+        // git merges into the path it handed us, so the ticket keeps its name.
+        filename: ours.filename.clone(),
+        filepath: ours.filepath.clone(),
+    }
+}
+
+/// The body is the part nobody can afford to lose. Two bodies that both changed
+/// are kept, with the lines both of them share written once: a shared opening
+/// paragraph is the same paragraph, and repeating it would bury the real
+/// difference. What only one side has goes under a horizontal rule, which reads
+/// as a separator in the app and in a plain editor. The base is only ever used
+/// to answer "which side changed this", never to bring text back.
+fn merge_bodies(base: Option<&str>, ours: &str, theirs: &str) -> String {
+    if ours == theirs {
+        return ours.to_string();
+    }
+    if base == Some(ours) {
+        return theirs.to_string();
+    }
+    if base == Some(theirs) {
+        return ours.to_string();
+    }
+    if ours.trim().is_empty() {
+        return theirs.to_string();
+    }
+    if theirs.trim().is_empty() {
+        return ours.to_string();
+    }
+
+    let a: Vec<&str> = ours.lines().collect();
+    let b: Vec<&str> = theirs.lines().collect();
+    let mut head = 0;
+    while head < a.len() && head < b.len() && a[head] == b[head] {
+        head += 1;
+    }
+    let mut tail = 0;
+    while tail < a.len() - head
+        && tail < b.len() - head
+        && a[a.len() - 1 - tail] == b[b.len() - 1 - tail]
+    {
+        tail += 1;
+    }
+
+    let ours_only = a[head..a.len() - tail].join("\n");
+    let theirs_only = b[head..b.len() - tail].join("\n");
+
+    // One side brought nothing of its own, so the other side's text is the
+    // whole answer and does not need a separator.
+    if ours_only.trim().is_empty() {
+        return theirs.to_string();
+    }
+    if theirs_only.trim().is_empty() {
+        return ours.to_string();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let shared_head = a[..head].join("\n");
+    let shared_tail = a[a.len() - tail..].join("\n");
+    if !shared_head.trim().is_empty() {
+        parts.push(shared_head);
+    }
+    parts.push(ours_only);
+    parts.push("---".to_string());
+    parts.push(theirs_only);
+    if !shared_tail.trim().is_empty() {
+        parts.push(shared_tail);
+    }
+
+    let mut merged = parts.join("\n\n");
+    if ours.ends_with('\n') {
+        merged.push('\n');
+    }
+    merged
+}
+
+/// Configure this clone so ticket files merge with the driver above.
+///
+/// Both pieces live inside the clone's `.git` - the attributes line and the
+/// `[merge]` section - so the repository the user shares gains no tracked file,
+/// and a teammate without GitTeam simply gets git's normal conflict.
+///
+/// Idempotent; returns whether it changed anything.
+async fn ensure_merge_driver(repo: &Path) -> Result<bool, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("could not locate the gitteam binary: {}", e))?;
+    ensure_merge_driver_with(repo, &merge_driver_command(&exe)).await
+}
+
+/// The command is a parameter so tests can register something they can actually
+/// run instead of pointing git at the test binary itself.
+async fn ensure_merge_driver_with(repo: &Path, command: &str) -> Result<bool, String> {
+    // Asking git where `.git` really is also covers a worktree or a submodule,
+    // where `.git` is a file pointing somewhere else.
+    let git_dir = run_git(repo, &["rev-parse", "--absolute-git-dir"], 15, None)
+        .await
+        .map(|out| PathBuf::from(out.trim()))
+        .map_err(|_| "not a git repository".to_string())?;
+
+    let mut changed = false;
+
+    let attributes = git_dir.join("info").join("attributes");
+    let rule = format!("{} merge={}", MERGE_DRIVER_PATTERN, MERGE_DRIVER_NAME);
+    let existing = fs::read_to_string(&attributes).unwrap_or_default();
+    if !existing.lines().any(|line| line.trim() == rule.as_str()) {
+        // Append: the file may already carry rules of the user's own.
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str("# Written by GitTeam, never tracked: merge two versions of one ticket file.\n");
+        next.push_str(&rule);
+        next.push('\n');
+        atomic_write(&attributes, &next)?;
+        changed = true;
+    }
+
+    let key = format!("merge.{}.driver", MERGE_DRIVER_NAME);
+    let configured = run_git(repo, &["config", "--get", &key], 15, None)
+        .await
+        .unwrap_or_default();
+    if configured.trim() != command {
+        run_git(repo, &["config", &key, command], 15, None).await?;
+        changed = true;
+    }
+
+    Ok(changed)
+}
+
 #[tauri::command]
 async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
     let dir = ensure_repo_root()?;
     if !dir.join(".git").exists() {
         return Err("Data directory is not a git repository. Please reconnect.".to_string());
+    }
+
+    // Before the pull, so this pull's own merge uses it: a project connected
+    // before the driver existed would otherwise stay without it until somebody
+    // linked it again. Failing is not fatal - the same merge just becomes a
+    // normal conflict.
+    if let Err(e) = ensure_merge_driver(&dir).await {
+        eprintln!("[gitteam] could not configure the ticket merge driver: {}", e);
     }
 
     run_git(&dir, &["fetch"], 300, None).await?;
@@ -3020,14 +3338,7 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     }
 
     fn git_in(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .args(["-c", "user.name=GitTeam Test"])
-            .args(["-c", "user.email=test@example.com"])
-            .args(["-c", "commit.gpgsign=false"])
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("git could not be started");
+        let out = git_out(dir, args);
         assert!(
             out.status.success(),
             "git {:?} failed in {}: {}{}",
@@ -3132,6 +3443,455 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let alice_now = alice_view.iter().find(|t| t.uid == alice_ticket.uid).unwrap();
         assert_eq!(alice_now.id, "TKT-1000");
         assert_eq!(alice_now.filepath, alice_ticket.filepath);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // --- merge driver -------------------------------------------------------
+
+    /// A git subprocess whose failure the caller inspects itself.
+    fn git_out(dir: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .args(["-c", "user.name=GitTeam Test"])
+            .args(["-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git could not be started")
+    }
+
+    fn driver_version(
+        status: &str,
+        tags: &[&str],
+        links: &[&str],
+        last_updated: &str,
+        body: &str,
+    ) -> Ticket {
+        let mut t = sample_ticket(links.iter().map(|s| s.to_string()).collect());
+        t.status = status.to_string();
+        t.tags = tags.iter().map(|s| s.to_string()).collect();
+        t.last_updated = last_updated.to_string();
+        t.body = body.to_string();
+        t
+    }
+
+    /// Write a ticket the way git hands it to the driver: a temp file with no
+    /// extension of its own, which is why the driver cannot rely on the name.
+    fn driver_file(
+        dir: &Path,
+        name: &str,
+        id: &str,
+        uid: &str,
+        status: &str,
+        title: &str,
+        body: &str,
+    ) -> PathBuf {
+        let mut t = sample_ticket(vec![]);
+        t.id = id.to_string();
+        t.uid = Some(uid.to_string());
+        t.status = status.to_string();
+        t.title = title.to_string();
+        t.body = body.to_string();
+        let path = dir.join(name);
+        fs::write(&path, render_frontmatter(&t)).unwrap();
+        path
+    }
+
+    fn driver_args(base: &Path, ours: &Path, theirs: &Path) -> Vec<String> {
+        vec![
+            base.to_string_lossy().to_string(),
+            ours.to_string_lossy().to_string(),
+            theirs.to_string_lossy().to_string(),
+        ]
+    }
+
+    #[test]
+    fn merge_driver_command_quotes_the_binary_and_uses_forward_slashes() {
+        assert_eq!(
+            merge_driver_command(Path::new("/opt/git team/gitteam")),
+            "\"/opt/git team/gitteam\" merge-driver %O %A %B",
+            "a path with a space has to reach git quoted"
+        );
+        assert_eq!(
+            merge_driver_command(Path::new("C:\\Program Files\\gitteam.exe")),
+            "\"C:/Program Files/gitteam.exe\" merge-driver %O %A %B",
+            "a backslash would be an escape character in git's shell"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_each_sides_own_change() {
+        let base = driver_version("backlog", &["ui"], &[], "2026-01-01T00:00:00Z", "Body");
+        let mut ours = base.clone();
+        ours.status = "in-progress".to_string();
+        ours.last_updated = "2026-01-02T00:00:00Z".to_string();
+        let mut theirs = base.clone();
+        theirs.title = "Renamed by them".to_string();
+        theirs.tags = vec!["ui".to_string(), "urgent".to_string()];
+        theirs.last_updated = "2026-01-03T00:00:00Z".to_string();
+
+        let merged = merge_ticket_versions_of(Some(&base), &ours, &theirs);
+
+        assert_eq!(merged.status, "in-progress", "our change survives");
+        assert_eq!(merged.title, "Renamed by them", "their change survives");
+        assert_eq!(
+            merged.tags,
+            vec!["ui".to_string(), "urgent".to_string()],
+            "the tag they added survives and the one they left alone is not doubled"
+        );
+        assert_eq!(
+            merged.last_updated, "2026-01-03T00:00:00Z",
+            "the merged ticket carries the newest edit"
+        );
+    }
+
+    #[test]
+    fn merge_lets_the_newer_edit_win_when_both_changed_the_same_field() {
+        let base = driver_version("backlog", &[], &[], "2026-01-01T00:00:00Z", "Body");
+        let mut ours = base.clone();
+        ours.status = "review".to_string();
+        ours.last_updated = "2026-01-05T00:00:00Z".to_string();
+        let mut theirs = base.clone();
+        theirs.status = "done".to_string();
+        theirs.last_updated = "2026-01-04T00:00:00Z".to_string();
+
+        let merged = merge_ticket_versions_of(Some(&base), &ours, &theirs);
+
+        assert_eq!(merged.status, "review", "the later edit is the survivor");
+    }
+
+    #[test]
+    fn merge_keeps_both_bodies_both_links_and_the_older_identity() {
+        let mut base = driver_version(
+            "backlog",
+            &[],
+            &["TKT-1"],
+            "2026-01-01T00:00:00Z",
+            "Opening",
+        );
+        base.uid = Some("01J8QK9W3M1111111111111111".to_string());
+        let mut ours = base.clone();
+        ours.body = "Opening\nour paragraph".to_string();
+        ours.links = vec!["TKT-1".to_string(), "TKT-7".to_string()];
+        ours.uid = Some("01J8QK9W3MZZZZZZZZZZZZZZZZ".to_string());
+        let mut theirs = base.clone();
+        theirs.body = "Opening\ntheir paragraph".to_string();
+        theirs.links = vec!["TKT-1".to_string(), "TKT-9".to_string()];
+        theirs.uid = Some("01J8QK9W3M0000000000000000".to_string());
+
+        let merged = merge_ticket_versions_of(Some(&base), &ours, &theirs);
+
+        assert!(
+            merged.body.contains("our paragraph") && merged.body.contains("their paragraph"),
+            "both texts have to survive: {:?}",
+            merged.body
+        );
+        assert_eq!(
+            merged.links,
+            vec![
+                "TKT-1".to_string(),
+                "TKT-7".to_string(),
+                "TKT-9".to_string()
+            ],
+            "no reference is dropped when both sides added one"
+        );
+        assert_eq!(
+            merged.uid.as_deref(),
+            Some("01J8QK9W3M0000000000000000"),
+            "the older identity wins"
+        );
+    }
+
+    #[test]
+    fn merge_writes_a_shared_opening_once_and_keeps_the_shared_tail() {
+        let base = driver_version(
+            "backlog",
+            &[],
+            &[],
+            "2026-01-01T00:00:00Z",
+            "Opening\nTrailer",
+        );
+        let mut ours = base.clone();
+        ours.body = "Opening\nour paragraph\nTrailer".to_string();
+        let mut theirs = base.clone();
+        theirs.body = "Opening\ntheir paragraph\nTrailer".to_string();
+
+        let merged = merge_ticket_versions_of(Some(&base), &ours, &theirs);
+
+        assert_eq!(
+            merged.body.matches("Opening").count(),
+            1,
+            "lines both sides kept are written once: {:?}",
+            merged.body
+        );
+        assert_eq!(
+            merged.body.matches("Trailer").count(),
+            1,
+            "a shared tail is not repeated either: {:?}",
+            merged.body
+        );
+        assert!(
+            merged.body.contains("our paragraph") && merged.body.contains("their paragraph"),
+            "{:?}",
+            merged.body
+        );
+    }
+
+    #[test]
+    fn merge_honours_a_body_one_side_removed() {
+        let base = driver_version("backlog", &[], &[], "2026-01-01T00:00:00Z", "Old text");
+        let mut ours = base.clone();
+        ours.body = String::new();
+        ours.last_updated = "2026-01-02T00:00:00Z".to_string();
+
+        let merged = merge_ticket_versions_of(Some(&base), &ours, &base);
+
+        assert_eq!(
+            merged.body, "",
+            "clearing the body is a change, not a reason to restore the old text"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_a_body_whose_own_text_contains_a_rule() {
+        let base = driver_version("backlog", &[], &[], "2026-01-01T00:00:00Z", "Opening");
+        let mut ours = base.clone();
+        ours.body = "Opening\n\n---\n\nour half".to_string();
+        let mut theirs = base.clone();
+        theirs.body = "Opening\ntheir half".to_string();
+
+        let merged = merge_ticket_versions_of(Some(&base), &ours, &theirs);
+        let dir = unique_temp_dir("merge-body-rule");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("TKT-1.md");
+        fs::write(&path, render_frontmatter(&merged)).unwrap();
+
+        let reparsed = parse_ticket_file(&path).unwrap();
+
+        assert!(
+            reparsed.body.contains("our half") && reparsed.body.contains("their half"),
+            "a horizontal rule inside a body must not break the file: {:?}",
+            reparsed.body
+        );
+        assert_eq!(reparsed.id, merged.id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_driver_writes_the_result_and_refuses_what_it_cannot_parse() {
+        let dir = unique_temp_dir("merge-driver-cli");
+        fs::create_dir_all(&dir).unwrap();
+        let base = driver_file(
+            &dir,
+            ".merge_file_base",
+            "TKT-1",
+            "01J8QK9W3M1111111111111111",
+            "backlog",
+            "Title",
+            "Body",
+        );
+        let ours = driver_file(
+            &dir,
+            ".merge_file_ours",
+            "TKT-1",
+            "01J8QK9W3M1111111111111111",
+            "in-progress",
+            "Title",
+            "our line",
+        );
+        let theirs = driver_file(
+            &dir,
+            ".merge_file_theirs",
+            "TKT-1",
+            "01J8QK9W3M1111111111111111",
+            "in-progress",
+            "Title",
+            "their line",
+        );
+
+        assert_eq!(
+            merge_driver_main(&driver_args(&base, &ours, &theirs)),
+            0,
+            "git's own temp names have to be accepted"
+        );
+        let merged = parse_ticket_file(&ours).unwrap();
+        assert_eq!(merged.status, "in-progress");
+        assert!(
+            merged.body.contains("our line") && merged.body.contains("their line"),
+            "{:?}",
+            merged.body
+        );
+
+        // A side that is not a ticket: refuse, and leave what git handed us
+        // exactly as it was, so its own conflict stays clean.
+        let junk = dir.join(".merge_file_junk");
+        fs::write(&junk, "not a ticket at all").unwrap();
+        assert_ne!(
+            merge_driver_main(&driver_args(&base, &junk, &theirs)),
+            0,
+            "an unparseable side must not be merged"
+        );
+        assert_eq!(fs::read_to_string(&junk).unwrap(), "not a ticket at all");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_driver_handles_an_add_add_with_an_empty_base() {
+        let dir = unique_temp_dir("merge-driver-addadd");
+        fs::create_dir_all(&dir).unwrap();
+        // For a merge with no ancestor git hands over an empty file.
+        let base = dir.join(".merge_file_base");
+        fs::write(&base, "").unwrap();
+        let ours = driver_file(
+            &dir,
+            ".merge_file_ours",
+            "TKT-1000",
+            "01J8QK9W3MZZZZZZZZZZZZZZZZ",
+            "backlog",
+            "Mine",
+            "my body",
+        );
+        let theirs = driver_file(
+            &dir,
+            ".merge_file_theirs",
+            "TKT-1000",
+            "01J8QK9W3M0000000000000000",
+            "done",
+            "Theirs",
+            "their body",
+        );
+
+        assert_eq!(
+            merge_driver_main(&driver_args(&base, &ours, &theirs)),
+            0,
+            "an empty base is a merge without history, not a failure"
+        );
+
+        let merged = parse_ticket_file(&ours).unwrap();
+        assert_eq!(merged.id, "TKT-1000", "one ticket comes out, not two");
+        assert!(
+            merged.body.contains("my body") && merged.body.contains("their body"),
+            "{:?}",
+            merged.body
+        );
+        assert_eq!(
+            merged.uid.as_deref(),
+            Some("01J8QK9W3M0000000000000000"),
+            "the older identity wins"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn registering_the_driver_is_idempotent_and_keeps_existing_rules() {
+        let dir = unique_temp_dir("driver-register");
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q", "."]);
+        fs::write(dir.join(".git/info/attributes"), "*.png binary\n").unwrap();
+
+        let command = "gitteam merge-driver %O %A %B";
+        assert!(
+            ensure_merge_driver_with(&dir, command).await.unwrap(),
+            "the first run configures the clone"
+        );
+        assert!(
+            !ensure_merge_driver_with(&dir, command).await.unwrap(),
+            "the second run changes nothing"
+        );
+
+        let attributes = fs::read_to_string(dir.join(".git/info/attributes")).unwrap();
+        assert!(
+            attributes.contains("*.png binary"),
+            "rules the user already had survive: {}",
+            attributes
+        );
+        assert_eq!(
+            attributes
+                .lines()
+                .filter(|line| line.trim() == "TKT-*.md merge=gitteam-ticket")
+                .count(),
+            1,
+            "exactly one rule, no duplicates: {}",
+            attributes
+        );
+
+        let configured = git_out(&dir, &["config", "--get", "merge.gitteam-ticket.driver"]);
+        assert_eq!(
+            String::from_utf8_lossy(&configured.stdout).trim(),
+            command
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_git_uses_the_registered_driver_and_merges_without_a_conflict() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("driver-e2e");
+        fs::create_dir_all(&root).unwrap();
+        git_in(&root, &["init", "-q", "."]);
+
+        let ticket = driver_file(
+            &root,
+            "TKT-1.md",
+            "TKT-1",
+            "01J8QK9W3M1111111111111111",
+            "backlog",
+            "Title",
+            "Body",
+        );
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-q", "-m", "base"]);
+
+        // Only once the commit exists: on an unborn HEAD `rev-parse
+        // --abbrev-ref` answers "HEAD" instead of a branch name, and checking
+        // that out would silently stay where we already were.
+        let branch = String::from_utf8_lossy(
+            &git_out(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
+        )
+        .trim()
+        .to_string();
+
+        // A stand-in driver: a test must never point git at the test binary,
+        // which would re-run the whole suite from inside a merge.
+        let script = root.join("driver.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\n{ cat \"$2\"; echo \"driver-ran\"; } > \"$2\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let command = format!("{} %O %A %B", script.display());
+        ensure_merge_driver_with(&root, &command).await.unwrap();
+
+        git_in(&root, &["checkout", "-q", "-b", "other"]);
+        fs::write(&ticket, "theirs\n").unwrap();
+        git_in(&root, &["commit", "-qam", "theirs"]);
+        git_in(&root, &["checkout", "-q", &branch]);
+        fs::write(&ticket, "ours\n").unwrap();
+        git_in(&root, &["commit", "-qam", "ours"]);
+
+        let merge = git_out(&root, &["merge", "-m", "merge other", "other"]);
+        assert!(
+            merge.status.success(),
+            "with the driver registered this merge must not conflict: {}{}",
+            String::from_utf8_lossy(&merge.stdout),
+            String::from_utf8_lossy(&merge.stderr)
+        );
+        let merged_file = fs::read_to_string(&ticket).unwrap();
+        assert!(
+            merged_file.contains("driver-ran"),
+            "git has to run the registered driver, not its own merge; file={:?}",
+            merged_file
+        );
+        assert!(
+            git_out(&root, &["diff", "--name-only", "--diff-filter=U"])
+                .stdout
+                .is_empty(),
+            "no unmerged path may be left behind"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

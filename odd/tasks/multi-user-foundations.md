@@ -36,13 +36,24 @@ Runner: `cd src-tauri && cargo test` · `npx tsc --noEmit` · `pnpm build`.
      renumerados no pueden quedar apuntando a la nada.
 
 - **S3 — El merge de tickets concurrentes no puede explotar.** (requisito vigente; mecanismo
-  **sin decidir**, ver L2.)
+  **decidido** e implementado: un merge driver propio, elegido por el usuario entre los tres
+  caminos de L4 — ver L6.)
   El requisito no cambió: cuando dos personas tocan el mismo tablero, la sincronización tiene que
   resolverse sin perder datos y sin dejar nunca un ticket ilegible. El mecanismo que se había
   aprobado — `merge=union` en `.git/info/attributes` — quedó **descartado por evidencia** (L2):
   duplica claves YAML, el archivo deja de parsear y el ticket **desaparece del tablero sin que
   git reporte conflicto**.
-  Criterios de aceptación, para cualquier mecanismo que se elija:
+
+  Mecanismo implementado: el binario de la app tiene un segundo entry point,
+  `gitteam merge-driver <base> <ours> <theirs>`, que git invoca como driver de `TKT-*.md`. Fusiona
+  campo por campo (gana el lado que cambió respecto de la base; si los dos cambiaron, gana el
+  `last_updated` más nuevo; el `uid` conserva el más viejo; `tags` y `links` se unen) y conserva los
+  dos cuerpos, escribiendo una sola vez las líneas que ambos comparten. El registro vive en
+  `.git/info/attributes` y en `.git/config` del clone —nunca versionado— y se hace al conectar el
+  proyecto y antes de cada pull. Si el driver no está o falla, git cae a su merge interno y deja un
+  conflicto normal: por eso todo lo que no se puede parsear termina en `exit 1`, sin escribir nada.
+
+  Criterios de aceptación:
   1. Ninguna sincronización puede dejar un ticket que no parsee, y menos en silencio. Si hay que
      elegir entre dos valores, la elección es determinista y queda registrada.
   2. Los cuerpos de los dos lados no se pierden.
@@ -67,7 +78,7 @@ Runner: `cd src-tauri && cargo test` · `npx tsc --noEmit` · `pnpm build`.
 |----|-------|-----|------|--------|--------|
 | T1 | S5 | Separar `repo_root()` (git: `.git`, clone/fetch/pull/push/status) de `tickets_dir()` (los `.md`). 13 call sites de git, 9 de archivos de ticket. | inline | hecho | `06b5c04` |
 | T2 | S2 | `uid` (ULID) en frontmatter + renumeración al merge + reescritura de `links`. | inline | hecho | `ec01beb` |
-| T3 | S3 | Mecanismo de merge (se había aprobado `merge=union` en `.git/info/attributes`). | inline | **bloqueada**: el mecanismo aprobado quedó descartado por evidencia (L2). Esperando decisión. | — |
+| T3 | S3 | Merge driver propio: segundo entry point `merge-driver` del binario, política campo por campo (tags/links unidos, `uid` más viejo, cuerpos con las líneas compartidas escritas una vez), registro idempotente en `.git/info/attributes` + `.git/config` al conectar y antes de cada pull, degradación a conflicto normal. | inline | hecho (riesgo: **item 1**, formato persistido) | este commit |
 | T4 | S2 | Prueba real de dos clones offline con git de verdad (repo bare local, fuera del workspace). | inline | hecho | `d080b63` |
 
 Regla de ruta: un solo cambio entendido por vez, inline (el Writer trigger no aplica: no hay
@@ -82,6 +93,9 @@ opcionales:
    porque los paths de `git status --porcelain` y de `git diff --name-only` son relativos a la
    raíz del repo, no a la carpeta de tickets.
 2. El pathspec de `git_commit_ticket` (`git add/commit -- <filename>`) necesita el prefijo.
+3. `MERGE_DRIVER_PATTERN` (`TKT-*.md` en `.git/info/attributes`) es relativo a la raíz del repo:
+   tiene que pasar a `tickets/TKT-*.md` en el mismo movimiento, o el driver deja de aplicarse en
+   silencio —el merge vuelve a ser el interno, que es justo el que rompe los tickets—.
 
 No se implementa ahora: sería una abstracción especulativa. Queda anotado porque es
 exactamente el tipo de acoplamiento que rompe en silencio.
@@ -178,3 +192,53 @@ exactamente el tipo de acoplamiento que rompe en silencio.
   La reparación posterior a `union` (camino b) tiene que decidir sobre un archivo en el que ya se
   perdió la procedencia de cada valor, y deja una ventana con el archivo inválido. Decisión del
   usuario pendiente en L6.
+
+- **L6 (2026-10-18) — T3 hecho: merge driver propio (el usuario eligió el camino (c) de L4).**
+  El usuario eligió el driver propio por sobre los otros dos caminos, con la evidencia de L2 y L5
+  sobre la mesa.
+
+  Cómo quedó, en `src-tauri/src/lib.rs` salvo el entry point:
+  - `merge-driver <base> <ours> <theirs>` es un segundo entry point del binario: `main.rs` corta el
+    argumento **antes** de `gitteam_lib::run()`, así que el camino de git nunca abre una ventana.
+  - El código de salida es la respuesta: `0` significa "`%A` tiene el resultado", cualquier otra
+    cosa significa "no pude" y git hace su merge dejando un conflicto normal. Todo lo que no se
+    puede parsear termina en `exit 1` **sin escribir** `%A`: eso es lo que hace verificable S3.1.
+  - Política: gana el lado que cambió respecto de la base; si los dos cambiaron el mismo campo, gana
+    el `last_updated` más nuevo; el `uid` conserva el más viejo (el mismo criterio que la
+    renumeración de T2, para no decidir identidad con un reloj); `tags` y `links` se unen cuando los
+    dos las tocaron; el cuerpo conserva los dos lados.
+  - El registro (`.git/info/attributes` + `git config merge.gitteam-ticket.driver`) es idempotente,
+    no pisa reglas que ya estaban y no agrega nada versionado (S3.3). Corre al conectar el proyecto
+    y **antes** de cada pull: si corriera después, el merge de ese pull no lo usaría.
+  - Sin `TKT-*.md` el driver no aplica a ningún otro archivo del repo: el patrón nombra exactamente
+    lo que la app posee.
+
+  Dos hallazgos que valen más que el código:
+  1. Un cuerpo editado por los dos lados se duplicaba entero, porque el cuerpo de cada lado incluye
+     el texto que ambos conservaron. Ahora las líneas compartidas al principio y al final se
+     escriben una sola vez y sólo las diferencias quedan separadas por una regla `---`. Medido en el
+     probe de dos clones: antes `Opening paragraph` dos veces, después una sola. El texto no se
+     pierde en ningún caso; esto es ruido menos, no corrección.
+  2. `git rev-parse --abbrev-ref HEAD` en un repo **sin commits** devuelve `HEAD`, no el nombre de la
+     rama. El test de punta a punta hacía `checkout HEAD`, que no cambia nada, así que los dos
+     commits caían en la misma rama y el merge decía "ya está actualizado": parecía un driver roto y
+     era el test. Lo encontró la aserción sobre la salida del driver; leer el código no lo mostraba.
+
+  Verificación: `cargo test` **42/42** (40 en la lib, 2 de integración) y `cargo check` limpio, sin
+  warnings; cero cambios en `Cargo.toml`/`Cargo.lock` (los tests de integración usan `tokio`, que ya
+  estaba). Sin cambios de frontend: `npx tsc --noEmit` sigue limpio.
+  `src-tauri/tests/merge_driver_cli.rs` corre el **binario real** como lo corre git —es lo único que
+  puede probar que `main` enruta el argumento— y verifica el merge limpio, el archivo resultante
+  parseable y el rechazo dejando `%A` intacto.
+  El registro se prueba con git de verdad: dos ramas que cambian el mismo ticket, el driver
+  registrado y el merge sin conflicto, con `git diff --diff-filter=U` vacío. El driver de ese test
+  es un script, nunca el binario de test: apuntar git al binario de test lo haría re-ejecutar la
+  suite desde adentro de un merge.
+  Probe de punta a punta, fuera del workspace (`/tmp/opencode/t3probe2`): repo bare local, dos
+  clones, cada uno edita el mismo `status` y agrega su párrafo, y el pull es el de la app
+  (`git pull --rebase --autostash`) con **el binario de la app** como driver. Resultado: `exit 0`,
+  sin conflicto, `status: "done"` (el `last_updated` más nuevo: 01-03 contra 01-02), los dos
+  párrafos en el cuerpo y `Opening paragraph` una sola vez, y `git ls-files` con sólo `TKT-1.md`.
+  Riesgo declarado: **item 1** — el driver decide el contenido de archivos persistidos. La
+  contención es que nunca escribe un archivo que no pudo parsear y que toda elección es
+  determinista.
