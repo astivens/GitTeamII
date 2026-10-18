@@ -35,15 +35,20 @@ Runner: `cd src-tauri && cargo test` · `npx tsc --noEmit` · `pnpm build`.
   5. Toda referencia en `links:` que apuntara al id renumerado se reescribe; los ids
      renumerados no pueden quedar apuntando a la nada.
 
-- **S3 — El merge de tickets no se pelea en los archivos append-only.**
-  Plan aprobado por el usuario:
-  > "Escribo `merge=union` para `TKT-*.md` en **`.git/info/attributes`**, no en un
-  > `.gitattributes` commiteado."
-
-  Criterios de aceptación:
-  1. La app asegura el atributo al linkear/conectar el repo, de forma idempotente.
-  2. **No** se agrega ningún archivo nuevo al repo del usuario (nada de `.gitattributes`
-     versionado): la config es local del clone.
+- **S3 — El merge de tickets concurrentes no puede explotar.** (requisito vigente; mecanismo
+  **sin decidir**, ver L2.)
+  El requisito no cambió: cuando dos personas tocan el mismo tablero, la sincronización tiene que
+  resolverse sin perder datos y sin dejar nunca un ticket ilegible. El mecanismo que se había
+  aprobado — `merge=union` en `.git/info/attributes` — quedó **descartado por evidencia** (L2):
+  duplica claves YAML, el archivo deja de parsear y el ticket **desaparece del tablero sin que
+  git reporte conflicto**.
+  Criterios de aceptación, para cualquier mecanismo que se elija:
+  1. Ninguna sincronización puede dejar un ticket que no parsee, y menos en silencio. Si hay que
+     elegir entre dos valores, la elección es determinista y queda registrada.
+  2. Los cuerpos de los dos lados no se pierden.
+  3. **No** se agrega ningún archivo versionado nuevo al repo del usuario.
+  4. Si el mecanismo depende de algo instalado en la máquina, su ausencia degrada a un conflicto
+     normal —que la app ya sabe resolver— nunca a un error duro.
 
 - **S4 — No se toca ningún repo ajeno.**
   La rama sigue siendo local: sin push, sin PR, sin commits fuera de acá. El repo del
@@ -60,10 +65,10 @@ Runner: `cd src-tauri && cargo test` · `npx tsc --noEmit` · `pnpm build`.
 
 | ID | Specs | Qué | Ruta | Estado | Commit |
 |----|-------|-----|------|--------|--------|
-| T1 | S5 | Separar `repo_root()` (git: `.git`, clone/fetch/pull/push/status) de `tickets_dir()` (los `.md`). 13 call sites de git, 9 de archivos de ticket. | inline | pendiente | — |
-| T2 | S2 | `uid` (ULID) en frontmatter + renumeración al merge + reescritura de `links`. | inline | pendiente | — |
-| T3 | S3 | `merge=union` para `TKT-*.md` en `.git/info/attributes`, idempotente, al setup/connect. | inline | pendiente | — |
-| T4 | S2 | Prueba real de dos clones offline en `mktemp -d` (fuera del workspace) + tests de regresión puros. | inline | pendiente | — |
+| T1 | S5 | Separar `repo_root()` (git: `.git`, clone/fetch/pull/push/status) de `tickets_dir()` (los `.md`). 13 call sites de git, 9 de archivos de ticket. | inline | hecho | `06b5c04` |
+| T2 | S2 | `uid` (ULID) en frontmatter + renumeración al merge + reescritura de `links`. | inline | hecho | `ec01beb` |
+| T3 | S3 | Mecanismo de merge (se había aprobado `merge=union` en `.git/info/attributes`). | inline | **bloqueada**: el mecanismo aprobado quedó descartado por evidencia (L2). Esperando decisión. | — |
+| T4 | S2 | Prueba real de dos clones offline con git de verdad (repo bare local, fuera del workspace). | inline | hecho | `d080b63` |
 
 Regla de ruta: un solo cambio entendido por vez, inline (el Writer trigger no aplica: no hay
 unidades independientes en paralelo ni backstop de contexto). Cada tarea es su propio commit.
@@ -98,3 +103,58 @@ exactamente el tipo de acoplamiento que rompe en silencio.
   > etc, pero free, para eso, necesitamos una forma gratuita de comunicar/enlazar esto con otros
   > usuarios sin tener que proveer un servidor web ni nada, sino permitir que se comuniquen como
   > wpp, como pin, etc"
+
+- **L2 (2026-10-18) — T1 hecho.** Refactor puro. La clasificación quedó verificada por el
+  compilador: 13 call sites de git, 9 de archivos de ticket, ninguno ambiguo. Dos cosas que la
+  exploración evitó: (a) el renombre masivo mordió `fn init_data_dir()` porque el texto
+  `init_data_dir()` contiene `data_dir()`; quedó como `init_repo_root` mientras `generate_handler!`
+  seguía registrando `init_data_dir`, o sea un error de compilación que igual conviene no dejar
+  pasar (detectado por una aserción antes de escribir); (b) la nota de stderr sobre el layout
+  legado vivía en la función de git y pasó al lado de tickets, que es a quien le corresponde.
+  Verificación: `cargo test` 17/17 sin tocar un test, `cargo check` limpio, y auditoría de
+  contrato: los 33 `invoke` del frontend resuelven a comandos registrados.
+
+- **L3 (2026-10-18) — T2 hecho.** `uid` ULID + renumeración. Un hallazgo de la exploración valía un
+  bug: `update_ticket` reconstruía el `Ticket` campo por campo, así que habría **borrado el `uid`
+  en cada edición** —la identidad del ticket—; y el test existente `update_ticket_preserves_links`
+  decía pasar por `update_ticket` pero escribía a mano, así que no lo habría detectado. Ahora llama
+  a la función real (`update_ticket_in`).
+  Entropía sin dependencias nuevas: `getrandom` ya estaba en el grafo vía tauri, así que se
+  promovió a dependencia directa y `Cargo.lock` quedó **byte-idéntico** (verificado con `git
+  diff`): cero crates nuevos.
+  El encoder se validó contra una implementación independiente (entero de 128 bits → base32, hecha
+  aparte en Python) y contra los valores límite del spec (`0…0` y `7ZZ…Z`). El vector mixto quedó
+  como test de regresión, junto con la lectura de vuelta del timestamp: un test de orden entre
+  nosotros solos habría pasado igual con el orden de bytes mal.
+  RED observado antes de implementar: con `reconcile_ticket_ids_in` en stub, los dos tests de
+  reconciliación fallaron (0 renombres donde se esperaba 1); con la implementación real, 28/28.
+
+- **L4 (2026-10-18) — T4 hecho. T3 bloqueada: el mecanismo aprobado quedó descartado por evidencia,
+  no implementado.**
+  T4: el probe con git real pasa (`cargo test` 29/29). Colisión `TKT-1000` reproducida en dos
+  clones, merge limpio sin conflicto, se renumera el perdedor conservando su `uid`, la referencia
+  que ese ticket ya tenía lo sigue, y al propagar el arreglo el otro clone queda con un dueño único
+  de `TKT-1000` y nada propio que renumerar.
+  T3: antes de escribir un atributo de merge en un repo, probé qué produce realmente. Con
+  `git merge-file --union` sobre dos versiones que cambian el mismo campo:
+  ```
+  status: "in-progress"
+  status: "done"
+  ```
+  y el parseo devuelve `PARSE ERROR: frontmatter is not a mapping`. Claves YAML duplicadas.
+  `parse_ticket_file` rechaza el archivo, `load_all_tickets` lo saltea con un mensaje a stderr y
+  `git_list_conflicts` (`git diff --diff-filter=U`) no reporta nada, porque git da el merge por
+  exitoso. O sea: **el ticket desaparece del tablero sin conflicto, sin error y sin nada en la UI**
+  — peor que un conflicto, que la app sí sabe resolver porque lee los stages del índice
+  (`git show HEAD:<file>`, `--diff-filter=U`), independientes del archivo roto del worktree.
+  Los cuerpos sí se conservan ("Ours body\nTheirs body"); lo que rompe es el frontmatter.
+  Decisión pendiente del usuario, tres caminos: (a) no escribir ningún driver y dejar que el
+  solapamiento real aparezca como conflicto resoluble; (b) `merge=union` más una pasada que colapse
+  las claves duplicadas con un ganador determinista, enganchada donde ya se renumera; (c) un merge
+  driver propio registrado en `.git/config` local (campo por campo, tags/links unidos, cuerpos
+  concatenados), que degrada a conflicto normal si el driver no está.
+  Nada de esto se implementó sin decisión.
+  Limitación conocida, anotada: una referencia `links:` a un id disputado se reescribe hacia el id
+  renumerado. Es correcto cuando un solo lado la escribió (el caso común) y queda apuntando al
+  ticket equivocado si los dos lados tenían referencias al mismo id; sin procedencia en el archivo
+  no hay forma de distinguirlas.
