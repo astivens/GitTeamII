@@ -158,3 +158,23 @@ exactamente el tipo de acoplamiento que rompe en silencio.
   renumerado. Es correcto cuando un solo lado la escribió (el caso común) y queda apuntando al
   ticket equivocado si los dos lados tenían referencias al mismo id; sin procedencia en el archivo
   no hay forma de distinguirlas.
+
+- **L5 (2026-10-18) — Medido: un merge driver propio degrada bien y funciona en el pull de la app.**
+  Antes de proponerlo medí el comportamiento real de git con `merge=<driver>` en
+  `.git/info/attributes`:
+  1. Driver cuyo comando **no existe**: git avisa y cae al merge interno → conflicto normal (`UU`
+     en el índice, marcadores en el worktree). No es un error duro.
+  2. Driver que existe pero **falla** (`exit 1`): igual, conflicto normal.
+  3. Driver que funciona: merge limpio, `exit 0`, se usa su salida.
+  Y con el driver registrado, `git pull --rebase --autostash` —el camino que usa la app— también lo
+  usa: rebase aplicado sin conflicto y el archivo quedó con la salida del driver.
+  El atributo y la config del driver viven en `.git/info/attributes` y `.git/config` del clone:
+  `git ls-files` no muestra nada nuevo, así que el repo del usuario no gana ningún archivo
+  versionado (S3.3).
+  Conclusión: un driver propio es el único camino que satisface los cuatro criterios a la vez —
+  S3.1 nunca deja un ticket ilegible, porque el archivo nunca pasa por un estado con claves
+  duplicadas; S3.2 tiene los dos lados como entradas separadas, así que puede unir cuerpos y
+  resolver campo por campo con información real; S3.4 degrada a conflicto normal si falta o falla.
+  La reparación posterior a `union` (camino b) tiene que decidir sobre un archivo en el que ya se
+  perdió la procedencia de cada valor, y deja una ventana con el archivo inválido. Decisión del
+  usuario pendiente en L6.
