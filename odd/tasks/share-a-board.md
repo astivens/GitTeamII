@@ -4,7 +4,7 @@ Objetivo: que dos o más personas compartan un board de tickets sin que nadie te
 
 Rama: `fase-6-v2-redesign` (tracker) · Runner: `cargo test` (Rust) y `npx tsc --noEmit` + `pnpm build` (frontend; no hay runner de tests JS) · Entrega: work-unit commits; el PR se decide cuando el usuario lo pida.
 
-Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`), **T3 junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`) — un link que del otro lado nadie puede canjear es una UI que miente —, **T5** (`cb16d79` + `1036d33`), **T6** (`e38c242`, corregido en `aee846e`) y **T7** (`7e8ab2e`), que verificó S6 y encontró dos agujeros reales, los dos arreglados. El diseño no cambió al implementar salvo donde el Log lo dice. La cadena publicada ya está mergeada en `main` (`57e2907`, ver L16).
+Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`), **T3 junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`) — un link que del otro lado nadie puede canjear es una UI que miente —, **T5** (`cb16d79` + `1036d33`), **T6** (`e38c242`, corregido en `aee846e`) y **T7** (`7e8ab2e`, corregido en `2fdb83b`), que verificó S6 y encontró dos agujeros reales, los dos arreglados. El diseño no cambió al implementar salvo donde el Log lo dice. La cadena publicada ya está mergeada en `main` (`57e2907`, ver L16).
 
 ## Specs
 
@@ -48,7 +48,7 @@ Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b
 | T4 | S4 | Flujo "Unirme a un board" (clonar con el PAT del que entra) | inline | **hecho** dentro de T3 (`a5c424f`); el clone real quedó sin ejercitar (sin red ni cuenta) |
 | T5 | S5 | Invitar por `@usuario` + aceptar invitaciones pendientes | inline | **hecho** `cb16d79` + `1036d33` |
 | T6 | S3 | Deep link `gitteam://` (registro del esquema) | inline | **hecho** `e38c242` + `aee846e` |
-| T7 | S6 | Verificación de que ni el link ni el repo llevan credenciales | inline | **hecho** `7e8ab2e` (dos agujeros reales, ver L17) |
+| T7 | S6 | Verificación de que ni el link ni el repo llevan credenciales | inline | **hecho** `7e8ab2e` + `2fdb83b` (dos agujeros y dos correcciones más: L17 y L18) |
 
 T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo deja de apuntar al repo de la app.
 
@@ -170,3 +170,20 @@ T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo
   Evidencia: **95 tests de unidad + 2 de integración** en verde (91 antes de T7), `npx tsc --noEmit` en 0, `pnpm build` en 0, árbol limpio. **Cada arreglo probado por mutación** (respaldo en scratch y restauración por caso): vaciar la redacción del redactor hace caer su tabla de casos; sacarla de `run_git` hace caer el del comando fallido; sacarla de `config_to_persist` hace caer el de `config.json`. La cuarta —sacar la redacción del formulario de conexión— **no** hace caer nada, y eso es exactamente el hallazgo de arriba.
 
   Límite honesto: el test del formulario de conexión pasa con y sin la redacción (porque git anonimiza solo), así que fija la propiedad de punta a punta y no el arreglo; los sitios de stderr del setup y del watcher quedan cubiertos por la función y por lectura, no por un test propio. `Risk: item 1` (la url guardada se reescribe limpia en la próxima escritura, o sea toca dato ya persistido) e `item 2` (credencial).
+- **L18 (2026-10-19)** — **Verificación independiente de T7** (verificador fresco, alcance `0733cc6..7e8ab2e`), con recheck acotado después.
+
+  **Cero blockers y 5 advisories.** Nada de lo que encontró reproduce sólo en el cambio: todo lo reprodujo también contra `0733cc6` en scratch, así que por la regla de severidad queda como advisory y no como blocker.
+
+  Verificado de verdad: la invitación limpia en las dos direcciones —construirla y parsear una editada a mano, incluido un link con esquema en mayúsculas—; `config.json` y el remote sin credencial con un fixture loopback de punta a punta, con el keyring conservando el PAT y reconectando en la corrida siguiente; el redactor byte-idéntico en toda salida real de git y en los mensajes sin credencial; `config_to_persist` idempotente y preservando nombre, email y `last_sync_at`; el diff sólo en `lib.rs`, con las 7 líneas borradas siendo exactamente los 4 sitios de llamada y el `to_string_pretty(config)`; y **C3 confirmado con 6 sondas reales**: git anonimiza el userinfo en todas las formas de fallo, así que la redacción del stderr es defensa de más y no un arreglo reproducido — su mutación de ese sitio no hace caer nada, igual que la mía.
+
+  **Corregido en `2fdb83b`**, los dos advisories que valían la pena y los dos más viejos que T7:
+  - **El token pegado volvía a la pantalla.** `setup_repo_inner` devolvía el config que había recibido, así que una url con token adentro —aunque `config.json` se escribía limpio— llegaba al frontend: `add_project` la ponía en el proyecto activo y el chip la renderiza como tooltip (`ProjectSwitcher.tsx:163`). Ahora el valor que se escribe y el que se devuelve **son el mismo**.
+  - **El esquema en mayúsculas se envolvía dos veces.** `with_authenticated_url` comparaba el esquema sensible al caso, así que un `HTTPS://…` pegado salía como `https://<pat>@HTTPS://…`: un remote roto y, peor, el token detrás de la `/` donde el redactor se detiene — la única forma en que git **sí** imprime la url tal como se le dio, o sea el único sitio donde esa redacción era portante. El esquema se normaliza primero, así que esa url ahora funciona y además se puede redactar.
+
+  **Recheck acotado a esos dos puntos** (mismo verificador, `4e89cb7..2fdb83b`): los dos advisories **desaparecieron**, con evidencia (`VFYR_RETURNED_HAS_TOKEN=false`, `VFYR_KEYRING_IS_FORM_PAT=true`, `VFYR_NEXT_RUN_OK=true`, y `LEAK=false` en las seis sondas de esquema en mayúsculas), y la mutación del arreglo del esquema hace caer **sólo** el test nuevo. Invariantes re-confirmadas byte a byte contra `0733cc6`. Los tests pasaron de 95 a **97 de unidad** + 2 de integración, sin editar ningún test existente.
+
+  **No adoptado, y por qué**: el verificador ofreció un test `#[ignore]` que fija el ida y vuelta `SetupResult`→`Project` con su fixture, pero correrlo tocaría el `~/.gitteam` real del usuario (`add_project` escribe keyring, proyecto activo y checkout). Es la misma razón por la que en T7 no se adoptó el `#[ignore]` anterior que escribía `$HOME`. Su receta queda registrada como el camino para fijarlo el día que haya un fixture en el repo. **Sí se adoptó**, en cambio, su sonda sobre el anonimizado de git (`git_anonymises_the_url_it_prints_so_the_redactor_is_a_no_op_on_it`): necesita sólo git local y fija el supuesto sobre el que descansa la redacción defensiva.
+
+  Recomendación abierta, no aplicada: el token sigue viajando en **argv** (confirmado en `/proc/<pid>/cmdline` y en `ps`), y cerrarlo es cambiar `-c` por `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_i` por entorno — decisión del usuario, no de esta tarea. Advisories que no se tocaron: una url con `@` en el path se corrompe al escribirla (`strip_userinfo`/`invite_repo_url`, fuera de dominio para GitHub y anterior a T7), y `strip_stored_userinfo` sigue siendo sensible al caso para un remote guardado a mano en mayúsculas (el remote que escribe la app queda limpio igual, porque `strip_userinfo` no lo es).
+
+  RDD sobre `fc7a2e4..HEAD` después de la corrección: `risk: medium`, `review_due: false`, `review_due_reason: under_budget` (21 paths, 3837 líneas). La frontera revisada sigue en `fc7a2e4`.
