@@ -26,6 +26,19 @@ export interface AddProjectInput {
   user_email: string;
 }
 
+/**
+ * Creating a board: the repository itself is created by the backend on GitHub.
+ * Every field is optional in practice — an empty `name` becomes
+ * `<project>-board`, and an empty `pat` / `user_name` / `user_email` reuse the
+ * active project's saved ones.
+ */
+export interface BoardCreateInput {
+  name: string;
+  pat: string;
+  user_name: string;
+  user_email: string;
+}
+
 export interface TestConnectionResult {
   ok: boolean;
   head_sha: string | null;

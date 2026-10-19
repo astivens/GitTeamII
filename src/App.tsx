@@ -51,12 +51,13 @@ function App() {
   const [bootDone, setBootDone] = useState(false);
   /**
    * Forces the SetupScreen to render on demand, even when there are already
-   * linked projects. Set when the user clicks "Link repository" / "Link new
-   * repository" from the ProjectSwitcher empty-state pill or from the
-   * no-project main-area empty state. Cleared automatically once a project
-   * becomes active (SetupScreen completed successfully).
+   * linked projects. The value remembers which project was active when the user
+   * asked for the screen ("" when there was none): the screen has to close when
+   * a *different* project becomes active — that is a successful submission — and
+   * not the moment it opens, which is what made this CTA dead whenever a project
+   * was already linked.
    */
-  const [setupForced, setSetupForced] = useState(false);
+  const [setupForcedFrom, setSetupForcedFrom] = useState<string | null>(null);
 
   useEffect(() => {
     void loadProjects().finally(() => setBootDone(true));
@@ -68,17 +69,20 @@ function App() {
   // SetupScreen submission restores the normal app shell.
   useEffect(() => {
     function onLinkNew() {
-      setSetupForced(true);
+      setSetupForcedFrom(activeProject?.id ?? "");
     }
     window.addEventListener("gitteam:link-new-repo", onLinkNew);
     return () => window.removeEventListener("gitteam:link-new-repo", onLinkNew);
-  }, []);
+  }, [activeProject]);
 
   useEffect(() => {
-    if (activeProject && setupForced) {
-      setSetupForced(false);
+    if (
+      setupForcedFrom !== null &&
+      (activeProject?.id ?? "") !== setupForcedFrom
+    ) {
+      setSetupForcedFrom(null);
     }
-  }, [activeProject, setupForced]);
+  }, [activeProject, setupForcedFrom]);
 
   // Window focus → auto-pull if synced and no pending local changes
   useEffect(() => {
@@ -184,10 +188,20 @@ function App() {
   // after the user removes their active project), we render the normal app
   // shell instead — the ProjectSwitcher pill in the header shows an empty
   // state and the main area shows the NoProjectEmptyState card.
-  if (bootDone && (setupForced || (syncStatus === "unconfigured" && projects.length === 0))) {
+  if (
+    bootDone &&
+    (setupForcedFrom !== null ||
+      (syncStatus === "unconfigured" && projects.length === 0))
+  ) {
     return (
       <div className="h-full bg-bg text-fg">
-        <SetupScreen />
+        <SetupScreen
+          onCancel={
+            setupForcedFrom !== null && activeProject
+              ? () => setSetupForcedFrom(null)
+              : undefined
+          }
+        />
         <ToastHost />
         <HelpOverlay />
       </div>
@@ -248,7 +262,7 @@ function App() {
           // one). Show the no-project card with a CTA that reopens
           // SetupScreen.
           <NoProjectEmptyState
-            onLinkRepo={() => setSetupForced(true)}
+            onLinkRepo={() => setSetupForcedFrom("")}
           />
         ) : showEmpty ? (
           justSetup ? (
