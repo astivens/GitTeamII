@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useI18n } from "../../lib/i18n";
 import { pushToast } from "../../lib/toast";
 import { useTicketsStore } from "../../store/tickets";
 
@@ -11,6 +12,7 @@ interface CopyForAIButtonProps {
 }
 
 export function CopyForAIButton({ filename, compact = false }: CopyForAIButtonProps) {
+  const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
 
@@ -20,11 +22,11 @@ export function CopyForAIButton({ filename, compact = false }: CopyForAIButtonPr
       const raw = await useTicketsStore.getState().getRawMarkdown(filename);
       await writeText(raw);
       setDone(true);
-      pushToast("Contexto copiado al portapapeles", "success");
+      pushToast(t.tickets.copiedContext, "success");
       window.setTimeout(() => setDone(false), 1500);
     } catch (e) {
       pushToast(
-        `Error copying: ${e instanceof Error ? e.message : String(e)}`,
+        t.tickets.copyError(e instanceof Error ? e.message : String(e)),
         "error",
       );
     } finally {
@@ -41,8 +43,8 @@ export function CopyForAIButton({ filename, compact = false }: CopyForAIButtonPr
           void onClick();
         }}
         disabled={busy}
-        title="Copy full ticket markdown for AI context"
-        aria-label="Copy ticket markdown for AI"
+        title={t.tickets.copyForAiTitle}
+        aria-label={t.tickets.copyForAiAria}
         className="shrink-0 inline-flex items-center gap-1 ml-auto font-mono"
         style={{
           height: 18,
@@ -62,7 +64,7 @@ export function CopyForAIButton({ filename, compact = false }: CopyForAIButtonPr
         ) : (
           <Copy size={10} />
         )}
-        <span>{done ? "Copied" : "AI"}</span>
+        <span>{done ? t.common.copied : t.tickets.copyForAiShort}</span>
       </button>
     );
   }
@@ -75,7 +77,7 @@ export function CopyForAIButton({ filename, compact = false }: CopyForAIButtonPr
       className="btn btn-outline"
     >
       {done ? <Check size={14} /> : <Copy size={14} />}
-      {done ? "Copied" : "Copiar para IA"}
+      {done ? t.common.copied : t.tickets.copyForAi}
     </button>
   );
 }

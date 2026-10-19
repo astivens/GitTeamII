@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { X } from "lucide-react";
 import type { Ticket, TicketStatus } from "../../types/ticket";
 import { useTicketsStore } from "../../store/tickets";
+import { useI18n } from "../../lib/i18n";
 import { Column } from "./Column";
 
 interface KanbanBoardProps {
@@ -9,30 +10,23 @@ interface KanbanBoardProps {
   onSelect: (ticket: Ticket) => void;
 }
 
+// `status` keys the stored frontmatter value; the visible label comes from the
+// dictionary at render time.
 const ALL_COLUMNS: Array<{
   status: TicketStatus;
-  label: string;
   dotClass: string;
 }> = [
-  { status: "backlog", label: "Backlog", dotClass: "status-dot-backlog" },
+  { status: "backlog", dotClass: "status-dot-backlog" },
   {
     status: "in-progress",
-    label: "In Progress",
     dotClass: "status-dot-progress",
   },
-  { status: "review", label: "Review", dotClass: "status-dot-review" },
-  { status: "done", label: "Done", dotClass: "status-dot-done" },
+  { status: "review", dotClass: "status-dot-review" },
+  { status: "done", dotClass: "status-dot-done" },
 ];
 
-const FILTER_LABEL: Record<TicketStatus, string> = {
-  backlog: "Backlog",
-  "in-progress": "In Progress",
-  review: "Review",
-  done: "Done",
-  archived: "Archived",
-};
-
 export function KanbanBoard({ tickets, onSelect }: KanbanBoardProps) {
+  const { t } = useI18n();
   const statusFilter = useTicketsStore((s) => s.statusFilter);
   const setStatusFilter = useTicketsStore((s) => s.setStatusFilter);
 
@@ -61,9 +55,9 @@ export function KanbanBoard({ tickets, onSelect }: KanbanBoardProps) {
       {statusFilter !== "all" ? (
         <div className="flex items-center justify-between px-4 py-2 text-xs text-fg-muted border-b bg-bg">
           <span>
-            Showing:{" "}
+            {t.tickets.showing}{" "}
             <span className="text-fg font-medium">
-              {FILTER_LABEL[statusFilter]}
+              {t.tickets.status[statusFilter]}
             </span>
           </span>
           <button
@@ -72,7 +66,7 @@ export function KanbanBoard({ tickets, onSelect }: KanbanBoardProps) {
             onClick={() => setStatusFilter("all")}
           >
             <X size={12} />
-            Clear filter
+            {t.tickets.clearFilter}
           </button>
         </div>
       ) : null}
@@ -81,7 +75,7 @@ export function KanbanBoard({ tickets, onSelect }: KanbanBoardProps) {
           <Column
             key={col.status}
             status={col.status}
-            label={col.label}
+            label={t.tickets.status[col.status]}
             dotClass={col.dotClass}
             tickets={grouped[col.status]}
             onSelect={onSelect}
