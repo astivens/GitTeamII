@@ -5,7 +5,7 @@ import { Input } from "../ui/Input";
 import { useTicketsStore } from "../../store/tickets";
 import { pushToast } from "../../lib/toast";
 import * as api from "../../lib/tauri";
-import type { InviteDetails } from "../../types/git";
+import type { InviteDetails, PendingInvitation } from "../../types/git";
 
 type Mode = "connect" | "create" | "join";
 
@@ -33,6 +33,7 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
   const [boardName, setBoardName] = useState("");
   const [inviteLink, setInviteLink] = useState("");
   const [invite, setInvite] = useState<InviteDetails | null>(null);
+  const [pending, setPending] = useState<PendingInvitation | null>(null);
   const [pat, setPat] = useState("");
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
@@ -50,6 +51,7 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
     // A parsed invitation belongs to the join form alone: leaving it behind
     // would let it decide where another form clones from.
     setInvite(null);
+    setPending(null);
     setError(null);
   };
 
@@ -64,8 +66,65 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
     setBusy(true);
     try {
       setInvite(await api.boardParseInvite(trimmed));
+      setPending(null);
     } catch (err) {
       setInvite(null);
+      setPending(null);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * The path a join and a connect share: test the connection, then enter through
+   * the same door a hand-made clone uses. When the test fails, GitHub may be
+   * holding an invitation for this board, so it asks for it — accepting it from
+   * here is what the mail would otherwise be for.
+   */
+  const joinBoard = async (
+    target: string,
+    token: string,
+    name: string,
+    email: string,
+  ) => {
+    const test = await api.gitTestConnection(target, token);
+    if (!test.ok) {
+      setError(test.error ?? "Could not connect to the repository.");
+      try {
+        const [invitation] = await api.githubPendingInvitations(token, target);
+        setPending(invitation ?? null);
+      } catch {
+        // If GitHub cannot be asked, the clone error stands: nothing is invented.
+        setPending(null);
+      }
+      return;
+    }
+    setPending(null);
+    await addProject({
+      url: target,
+      pat: token,
+      user_name: name,
+      user_email: email,
+    });
+    pushToast(`Connected to ${test.repo_name}`, "success");
+  };
+
+  const acceptPending = async () => {
+    if (!pending || !invite) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.githubAcceptInvitation(pat.trim(), pending.id);
+      setPending(null);
+      pushToast("Invitation accepted", "success");
+      await joinBoard(
+        invite.repo_url,
+        pat.trim(),
+        userName.trim(),
+        userEmail.trim(),
+      );
+    } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
@@ -116,19 +175,12 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
         });
         pushToast(`Created ${project.name}`, "success");
       } else {
-        const target = invite ? invite.repo_url : trimmedUrl;
-        const test = await api.gitTestConnection(target, trimmedPat);
-        if (!test.ok) {
-          setError(test.error ?? "Could not connect to the repository.");
-          return;
-        }
-        await addProject({
-          url: target,
-          pat: trimmedPat,
-          user_name: trimmedName,
-          user_email: trimmedEmail,
-        });
-        pushToast(`Connected to ${test.repo_name}`, "success");
+        await joinBoard(
+          invite ? invite.repo_url : trimmedUrl,
+          trimmedPat,
+          trimmedName,
+          trimmedEmail,
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -252,6 +304,7 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
                 onChange={(e) => {
                   setInviteLink(e.currentTarget.value);
                   setInvite(null);
+                  setPending(null);
                 }}
                 placeholder="gitteam://join?repo=…"
                 autoFocus
@@ -355,7 +408,9 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
               {mode === "join" ? (
                 <p className="text-fg-subtle text-xs">
                   Your access has to be granted by whoever invited you: the link
-                  is not a key, and the board is private.
+                  is not a key, and the board is private. If they already gave it
+                  to you by user name, GitTeam offers to accept the invitation
+                  here.
                 </p>
               ) : null}
             </>
@@ -371,6 +426,35 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
               }}
             >
               {error}
+            </div>
+          ) : null}
+
+          {pending ? (
+            <div
+              className="text-sm border rounded-md px-3 py-2 flex flex-col"
+              style={{
+                gap: 8,
+                borderColor: "rgba(99, 102, 241, 0.4)",
+                background: "rgba(99, 102, 241, 0.1)",
+              }}
+            >
+              <p className="text-fg">
+                GitHub is holding an invitation for you on{" "}
+                <span className="font-mono">{pending.repo}</span>
+                {pending.from ? <> · sent by {pending.from}</> : null}. A private
+                board clones once it is accepted.
+              </p>
+              <Button
+                type="button"
+                variant="primary"
+                onClick={() => void acceptPending()}
+                disabled={busy}
+              >
+                {busy ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : null}
+                Accept and join
+              </Button>
             </div>
           ) : null}
 
