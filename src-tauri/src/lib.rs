@@ -8,7 +8,7 @@ use chrono::Utc;
 use gray_matter::engine::YAML;
 use gray_matter::{Matter, Pod};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -3257,6 +3257,58 @@ fn board_parse_invite(text: String) -> Result<InviteDetails, String> {
     parse_invite_link(&text)
 }
 
+/// Lo que trajo el esquema `gitteam://`, ya decidido: una invitación es lo único
+/// que abre la entrada a un board, y un link de GitTeam que no lo sea se
+/// contesta en pantalla en vez de desaparecer sin decir nada.
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct LinkIntake {
+    /// La primera invitación de la lista, para mostrarla antes de clonar.
+    pub invite: Option<String>,
+    /// El primer link de GitTeam que no era una invitación, cuando no hubo
+    /// ninguna: sirve para decir por qué no pasó nada.
+    pub not_an_invitation: Option<String>,
+}
+
+/// El sistema operativo entrega lo que el usuario clickeó, que puede no ser una
+/// invitación (`gitteam://` es nuestro y puede llevar otra cosa, o venir de una
+/// versión que no conocemos) y puede llegar repetido, vacío o con espacios. La
+/// decisión se toma una sola vez, acá, donde ya se sabe leer el formato: la UI
+/// no repite el parser ni inventa un segundo criterio.
+fn classify_received_links(urls: &[String]) -> LinkIntake {
+    let mut first_other = None;
+    for url in urls {
+        let url = url.trim();
+        if url.is_empty() {
+            continue;
+        }
+        // Una invitación gana sobre cualquier otro link, aparezca antes o
+        // después: es el único de los dos que hace algo, y con una en mano no
+        // queda nada que reprocharle a los demás. Por eso los dos campos nunca
+        // conviven.
+        if parse_invite_link(url).is_ok() {
+            return LinkIntake {
+                invite: Some(url.to_string()),
+                not_an_invitation: None,
+            };
+        }
+        if first_other.is_none() {
+            first_other = Some(url.to_string());
+        }
+    }
+    LinkIntake {
+        invite: None,
+        not_an_invitation: first_other,
+    }
+}
+
+/// Traduce los links con los que el sistema abrió (o despertó) la app. El
+/// frontend llama a esto con lo que recibe del plugin de deep links, que en
+/// Linux incluye el argumento con el que se lanzó la primera instancia.
+#[tauri::command]
+fn gitteam_link_intake(urls: Vec<String>) -> LinkIntake {
+    classify_received_links(&urls)
+}
+
 // ----- Compartir un board: el acceso lo otorga el dueño, por @usuario -----
 
 /// One place for the HTTP client GitHub's calls share, so the timeout is
@@ -3642,10 +3694,35 @@ fn switch_project(project_id: String) -> Result<Project, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // El primero de todos: en Linux y Windows el sistema no le entrega el
+        // link a la app que ya está abierta, lanza una segunda instancia con la
+        // url como argumento. Este plugin la detecta, le pasa ese argumento al
+        // plugin de deep links (feature `deep-link`) y la cierra, así que el
+        // click termina en la ventana que ya existe y no en una copia nueva.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // En un paquete el esquema lo declara el instalador; acá se registra
+            // además a mano porque `tauri dev` corre sin instalar nada, y sin
+            // registro el sistema nunca entrega el link. Es idempotente y el
+            // plugin corrige el `Exec` si el binario se movió. Un fallo acá no
+            // puede impedir que la app abra.
+            #[cfg(target_os = "linux")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register_all();
+            }
+            Ok(())
+        })
         .manage(WatcherState::default())
         .invoke_handler(tauri::generate_handler![
             init_data_dir,
@@ -3680,6 +3757,8 @@ pub fn run() {
             board_create,
             board_invite_link,
             board_parse_invite,
+            // Deep link (T6)
+            gitteam_link_intake,
             board_invite_collaborator,
             github_pending_invitations,
             github_accept_invitation,
@@ -5363,6 +5442,66 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             let link = format!("gitteam://join?repo={}", bad);
             assert!(parse_invite_link(&link).is_err(), "accepted {:?}", bad);
         }
+    }
+
+    // ----- T6: el link abre la app, y lo que llega puede no ser una invitación -----
+
+    #[test]
+    fn a_received_link_is_an_invitation_when_it_reads_as_one() {
+        let url =
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=b&from=Ana";
+        let intake = classify_received_links(&[url.to_string()]);
+        assert_eq!(intake.invite.as_deref(), Some(url));
+        assert_eq!(intake.not_an_invitation, None);
+    }
+
+    #[test]
+    fn a_gitteam_link_that_is_not_an_invitation_is_reported_rather_than_ignored() {
+        // El esquema es nuestro, así que lo que llegue por ahí no es
+        // necesariamente una invitación. Decirlo es la diferencia entre no hacer
+        // nada y no hacer nada *sin explicar por qué*.
+        for other in [
+            "gitteam://other?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git",
+            "gitteam://join",
+            "gitteam://join?board=only-a-label",
+            "https://github.com/a/b.git",
+        ] {
+            let intake = classify_received_links(&[other.to_string()]);
+            assert_eq!(intake.invite, None, "accepted {:?}", other);
+            assert_eq!(
+                intake.not_an_invitation.as_deref(),
+                Some(other),
+                "did not report {:?}",
+                other
+            );
+        }
+    }
+
+    #[test]
+    fn no_link_arrives_as_nothing_rather_than_as_an_error() {
+        // Arrancar la app sin link es el caso normal: no hay nada que avisar.
+        assert_eq!(classify_received_links(&[]), LinkIntake::default());
+        assert_eq!(
+            classify_received_links(&["".to_string(), "   ".to_string()]),
+            LinkIntake::default()
+        );
+    }
+
+    #[test]
+    fn the_invitation_wins_over_the_other_links_around_it() {
+        let link = "  gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git  ";
+        let intake = classify_received_links(&[
+            "gitteam://other".to_string(),
+            link.to_string(),
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fc%2Fd.git".to_string(),
+        ]);
+        // Recortado, porque un link que pasó por un mensajero llega con espacios.
+        assert_eq!(
+            intake.invite.as_deref(),
+            Some("gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git")
+        );
+        // Con una invitación en mano no hay nada que reprocharle a los demás.
+        assert_eq!(intake.not_an_invitation, None);
     }
 
     // ----- T5: el dueño otorga el acceso por @usuario -----

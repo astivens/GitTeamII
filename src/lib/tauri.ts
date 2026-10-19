@@ -8,6 +8,7 @@ import type {
   GitConfig,
   GitStatus,
   InviteDetails,
+  LinkIntake,
   PendingInvitation,
   Project,
   PullResult,
@@ -87,6 +88,18 @@ export async function githubAcceptInvitation(
   invitationId: number,
 ): Promise<void> {
   return invoke<void>("github_accept_invitation", { pat, invitationId });
+}
+
+/**
+ * Turns the links the operating system handed to the app — the one the app was
+ * launched with, and any that arrived while it was already running — into a
+ * single decision. Which shape is an invitation is decided by the backend, the
+ * same place that reads a pasted one, so the format is written once.
+ */
+export async function gitteamLinkIntake(
+  urls: string[],
+): Promise<LinkIntake> {
+  return invoke<LinkIntake>("gitteam_link_intake", { urls });
 }
 
 export async function removeProject(projectId: string): Promise<void> {

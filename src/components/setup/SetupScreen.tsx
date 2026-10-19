@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GitBranch, Loader2 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
@@ -12,6 +12,13 @@ type Mode = "connect" | "create" | "join";
 interface SetupScreenProps {
   /** Present when the screen was opened on demand over an already linked board. */
   onCancel?: () => void;
+  /**
+   * The invitation that opened this screen, when the user got here by clicking a
+   * `gitteam://` link instead of pasting one. The form starts on the join path
+   * with the link already in place, and reads it on its own: the click is the
+   * choice, so asking for the same link again by hand would be asking twice.
+   */
+  initialInviteLink?: string | null;
 }
 
 /**
@@ -23,15 +30,17 @@ interface SetupScreenProps {
  * Sharing a board is sharing its repository, which is why a board has a
  * repository of its own and the one holding the code is never involved.
  */
-export function SetupScreen({ onCancel }: SetupScreenProps) {
+export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
   const addProject = useTicketsStore((s) => s.addProject);
   const createBoard = useTicketsStore((s) => s.createBoard);
   const activeProject = useTicketsStore((s) => s.activeProject);
 
-  const [mode, setMode] = useState<Mode>("connect");
+  const [mode, setMode] = useState<Mode>(
+    initialInviteLink ? "join" : "connect",
+  );
   const [url, setUrl] = useState("");
   const [boardName, setBoardName] = useState("");
-  const [inviteLink, setInviteLink] = useState("");
+  const [inviteLink, setInviteLink] = useState(initialInviteLink ?? "");
   const [invite, setInvite] = useState<InviteDetails | null>(null);
   // La invitación viaja junto al destino por el que se preguntó: aceptarla tiene
   // que reintentar *ese* destino, y en conectar no hay link parseado del que
@@ -61,10 +70,13 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
     setError(null);
   };
 
-  const checkInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    const trimmed = inviteLink.trim();
+  /**
+   * Reads a link and leaves it on screen: that is the step that shows which
+   * board it is for, before a token is asked for. The pasted one and the one
+   * that opened the app go through here.
+   */
+  async function readInvite(text: string) {
+    const trimmed = text.trim();
     if (!trimmed) {
       setError("Paste the invitation link you were sent.");
       return;
@@ -80,7 +92,24 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
     } finally {
       setBusy(false);
     }
+  }
+
+  const checkInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    await readInvite(inviteLink);
   };
+
+  // A link that arrives while this screen is already up changes what there is to
+  // do: it moves the form to join and reads it, instead of leaving it waiting to
+  // be pasted by hand.
+  useEffect(() => {
+    if (!initialInviteLink) return;
+    setMode("join");
+    setInviteLink(initialInviteLink);
+    setError(null);
+    void readInvite(initialInviteLink);
+  }, [initialInviteLink]);
 
   /**
    * The path a join and a connect share: test the connection, then enter through

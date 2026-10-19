@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { AppHeader } from "./components/layout/AppHeader";
 import {
   EmptyState,
@@ -20,6 +21,7 @@ import { ConflictModal } from "./components/conflicts/ConflictModal";
 import { useTicketsStore } from "./store/tickets";
 import { useGlobalShortcuts } from "./lib/keyboard";
 import { pushToast } from "./lib/toast";
+import { gitteamLinkIntake } from "./lib/tauri";
 import type { Ticket } from "./types/ticket";
 
 interface RemoteChangedPayload {
@@ -58,6 +60,13 @@ function App() {
    * was already linked.
    */
   const [setupForcedFrom, setSetupForcedFrom] = useState<string | null>(null);
+  /**
+   * The invitation that opened the SetupScreen, when the user got there by
+   * clicking a `gitteam://` link instead of pasting one. Cleared whenever the
+   * screen closes: left behind, the next "Link new repository" would open the
+   * join form holding somebody else's old invitation.
+   */
+  const [inviteFromLink, setInviteFromLink] = useState<string | null>(null);
 
   useEffect(() => {
     void loadProjects().finally(() => setBootDone(true));
@@ -81,6 +90,7 @@ function App() {
       (activeProject?.id ?? "") !== setupForcedFrom
     ) {
       setSetupForcedFrom(null);
+      setInviteFromLink(null);
     }
   }, [activeProject, setupForcedFrom]);
 
@@ -136,6 +146,62 @@ function App() {
     };
   }, []);
 
+  // A `gitteam://` link is the other way into the join flow: the user clicks it
+  // in whatever messenger they already use. On Linux and Windows the OS does not
+  // hand the URL to the app that is already running — it starts a second
+  // instance, which the single-instance plugin turns into an event for this one.
+  // `getCurrent` covers the other half: when the link is what launched the app,
+  // that event fires before this listener exists.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+
+    async function openReceived(urls: string[] | null) {
+      if (!urls || urls.length === 0) return;
+      try {
+        // Which shape counts as an invitation is decided by the backend, the
+        // same place that reads a pasted one.
+        const intake = await gitteamLinkIntake(urls);
+        if (intake.invite) {
+          // The same opener as the "Link new repository" CTA, so a successful
+          // join closes the screen instead of leaving it up.
+          setInviteFromLink(intake.invite);
+          setSetupForcedFrom(
+            useTicketsStore.getState().activeProject?.id ?? "",
+          );
+          return;
+        }
+        if (intake.not_an_invitation) {
+          pushToast("That link is not a GitTeam invitation.", "error");
+        }
+      } catch (e) {
+        pushToast(
+          `Could not read that link: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+      }
+    }
+
+    void (async () => {
+      try {
+        const stop = await onOpenUrl((urls) => void openReceived(urls));
+        if (cancelled) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+        await openReceived(await getCurrent());
+      } catch {
+        // Not running inside Tauri (e.g. plain vite dev) — silently ignore.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Global shortcuts (Cmd+K, n, /, ?).
   useGlobalShortcuts();
 
@@ -183,6 +249,11 @@ function App() {
     [initialized, loading, tickets],
   );
 
+  const closeSetup = () => {
+    setInviteFromLink(null);
+    setSetupForcedFrom(null);
+  };
+
   // First-time setup: full-screen SetupScreen only when the user has never
   // linked a repository. If `projects > 0` but `activeProject === null` (e.g.
   // after the user removes their active project), we render the normal app
@@ -196,10 +267,9 @@ function App() {
     return (
       <div className="h-full bg-bg text-fg">
         <SetupScreen
+          initialInviteLink={inviteFromLink}
           onCancel={
-            setupForcedFrom !== null && activeProject
-              ? () => setSetupForcedFrom(null)
-              : undefined
+            setupForcedFrom !== null && activeProject ? closeSetup : undefined
           }
         />
         <ToastHost />
