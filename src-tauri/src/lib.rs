@@ -20,6 +20,9 @@ pub struct Ticket {
     pub assignee: Option<String>,
     pub priority: String,
     pub tags: Vec<String>,
+    /// Related ticket ids declared in frontmatter (`links: [TKT-1041]`).
+    #[serde(default)]
+    pub links: Vec<String>,
     pub last_updated: String,
     pub body: String,
     pub filename: String,
@@ -39,6 +42,30 @@ pub struct CreateTicketInput {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub body: Option<String>,
+}
+
+// ----- graph -----
+
+#[derive(Serialize, Debug, Clone)]
+pub struct GraphNode {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub priority: String,
+    pub tags: Vec<String>,
+    pub filename: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Graph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -566,20 +593,45 @@ fn yaml_flow_seq(items: &[String]) -> String {
     format!("[{}]", parts.join(", "))
 }
 
+/// Normalize link targets: trim, uppercase, drop blanks, duplicates and
+/// self-references. Input order is preserved so the stored frontmatter stays
+/// stable for a given input.
+fn normalize_links(links: &[String], self_id: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in links {
+        let link = raw.trim().to_uppercase();
+        if link.is_empty() || link == self_id {
+            continue;
+        }
+        if !out.contains(&link) {
+            out.push(link);
+        }
+    }
+    out
+}
+
 fn render_frontmatter(t: &Ticket) -> String {
     let assignee_line = match &t.assignee {
         Some(a) => format!("assignee: {}\n", yaml_quote(a)),
         None => "assignee: null\n".to_string(),
     };
     let tags_line = format!("tags: {}\n", yaml_flow_seq(&t.tags));
+    // Only emitted when links exist: adding `links: []` to every ticket would
+    // rewrite the frontmatter of files that have nothing to link.
+    let links_line = if t.links.is_empty() {
+        String::new()
+    } else {
+        format!("links: {}\n", yaml_flow_seq(&t.links))
+    };
     format!(
-        "---\nid: {id}\ntitle: {title}\nstatus: {status}\n{assignee}priority: {priority}\n{tags}last_updated: {last_updated}\n---\n\n{body}",
+        "---\nid: {id}\ntitle: {title}\nstatus: {status}\n{assignee}priority: {priority}\n{tags}{links}last_updated: {last_updated}\n---\n\n{body}",
         id = yaml_quote(&t.id),
         title = yaml_quote(&t.title),
         status = yaml_quote(&t.status),
         assignee = assignee_line,
         priority = yaml_quote(&t.priority),
         tags = tags_line,
+        links = links_line,
         last_updated = yaml_quote(&t.last_updated),
         body = t.body,
     )
@@ -630,6 +682,24 @@ fn parse_ticket_file(path: &Path) -> Result<Ticket, String> {
         }
     };
 
+    let get_links = || -> Result<Vec<String>, String> {
+        match map.get("links") {
+            None => Ok(vec![]),
+            Some(v) if v.is_null() => Ok(vec![]),
+            Some(v) => match v.as_array() {
+                Some(arr) => arr
+                    .iter()
+                    .map(|item| {
+                        item.as_str()
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| "link is not a string".to_string())
+                    })
+                    .collect(),
+                None => Err("links is not an array".to_string()),
+            },
+        }
+    };
+
     let id = get_str("id")?;
     let title = get_str("title")?;
     let status = get_str("status")?;
@@ -637,6 +707,7 @@ fn parse_ticket_file(path: &Path) -> Result<Ticket, String> {
     let last_updated = get_str("last_updated")?;
     let assignee = get_opt_str("assignee")?;
     let tags = get_tags()?;
+    let links = get_links()?;
 
     let filename = path
         .file_name()
@@ -652,6 +723,7 @@ fn parse_ticket_file(path: &Path) -> Result<Ticket, String> {
         assignee,
         priority,
         tags,
+        links,
         last_updated,
         body: parsed.content,
         filename,
@@ -708,10 +780,8 @@ fn init_data_dir() -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
-#[tauri::command]
-fn list_tickets() -> Result<Vec<Ticket>, String> {
-    let dir = ensure_data_dir()?;
-    let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir failed: {}", e))?;
+fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("read_dir failed: {}", e))?;
     let mut tickets = vec![];
     for entry in entries.flatten() {
         let path = entry.path();
@@ -737,6 +807,12 @@ fn list_tickets() -> Result<Vec<Ticket>, String> {
     }
     sort_tickets_desc(&mut tickets);
     Ok(tickets)
+}
+
+#[tauri::command]
+fn list_tickets() -> Result<Vec<Ticket>, String> {
+    let dir = ensure_data_dir()?;
+    load_all_tickets(&dir)
 }
 
 #[tauri::command]
@@ -770,6 +846,8 @@ fn create_ticket(input: CreateTicketInput) -> Result<Ticket, String> {
         }),
         priority: input.priority.unwrap_or_else(|| "medium".to_string()),
         tags: input.tags.unwrap_or_default(),
+        // New tickets start unlinked; links are added with `link_tickets`.
+        links: vec![],
         last_updated: now_iso(),
         body: input.body.unwrap_or_default(),
         filename: filename.clone(),
@@ -806,6 +884,9 @@ fn update_ticket(filename: String, input: CreateTicketInput) -> Result<Ticket, S
             .or(existing.assignee),
         priority: input.priority.unwrap_or(existing.priority),
         tags: input.tags.unwrap_or(existing.tags),
+        // Links are owned by `link_tickets` / `unlink_tickets`; a normal edit
+        // must never drop them.
+        links: existing.links,
         last_updated: now_iso(),
         body: input.body.unwrap_or(existing.body),
         filename: existing.filename,
@@ -825,6 +906,125 @@ fn delete_ticket(filename: String) -> Result<(), String> {
         return Err(format!("file not found: {}", filename));
     }
     fs::remove_file(&path).map_err(|e| format!("remove failed: {}", e))
+}
+
+// ----- graph commands (Fase 6F) -----
+
+/// Resolve a ticket id such as `TKT-1041` to its file inside `dir`.
+fn find_ticket_path_by_id(dir: &Path, id: &str) -> Result<PathBuf, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("read_dir failed: {}", e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&path) {
+            if extract_id_from_content(&content).as_deref() == Some(id) {
+                return Ok(path);
+            }
+        }
+    }
+    Err(format!("ticket not found: {}", id))
+}
+
+/// Add `to` to `from`'s links, rewriting `from`'s file.
+///
+/// The target must exist so the graph never grows phantom nodes. Ids are
+/// expected to be normalized already by the command wrapper.
+fn link_in_dir(dir: &Path, from: &str, to: &str) -> Result<Ticket, String> {
+    if from == to {
+        return Err("cannot link a ticket to itself".to_string());
+    }
+    let path = find_ticket_path_by_id(dir, from)?;
+    // Resolve the target *before* writing so a typo cannot half-apply.
+    find_ticket_path_by_id(dir, to)?;
+
+    let mut ticket = parse_ticket_file(&path)?;
+    if !ticket.links.iter().any(|l| l == to) {
+        ticket.links.push(to.to_string());
+    }
+    ticket.links = normalize_links(&ticket.links, &ticket.id);
+    ticket.last_updated = now_iso();
+    atomic_write(&path, &render_frontmatter(&ticket))?;
+    Ok(ticket)
+}
+
+fn unlink_in_dir(dir: &Path, from: &str, to: &str) -> Result<Ticket, String> {
+    let path = find_ticket_path_by_id(dir, from)?;
+    let mut ticket = parse_ticket_file(&path)?;
+    ticket.links.retain(|l| l != to);
+    ticket.last_updated = now_iso();
+    atomic_write(&path, &render_frontmatter(&ticket))?;
+    Ok(ticket)
+}
+
+/// Add `to` to `from`'s `links`. The link is recorded on the source ticket
+/// only (like an Obsidian `[[wiki-link]]`); the graph renders the pair as one
+/// undirected edge.
+#[tauri::command]
+fn link_tickets(from: String, to: String) -> Result<Ticket, String> {
+    let dir = ensure_data_dir()?;
+    let from = from.trim().to_uppercase();
+    let to = to.trim().to_uppercase();
+    link_in_dir(&dir, &from, &to)
+}
+
+#[tauri::command]
+fn unlink_tickets(from: String, to: String) -> Result<Ticket, String> {
+    let dir = ensure_data_dir()?;
+    let from = from.trim().to_uppercase();
+    let to = to.trim().to_uppercase();
+    unlink_in_dir(&dir, &from, &to)
+}
+
+/// Build the undirected edge list from declared links.
+///
+/// Links pointing at tickets that do not exist are dropped (they would
+/// otherwise render as phantom nodes), and each unordered pair is emitted
+/// exactly once, so `A → B` plus `B → A` collapses into a single edge.
+fn build_edges(tickets: &[Ticket]) -> Vec<GraphEdge> {
+    let known: std::collections::HashSet<&str> =
+        tickets.iter().map(|t| t.id.as_str()).collect();
+
+    let mut edges: Vec<GraphEdge> = Vec::new();
+    for t in tickets {
+        for link in &t.links {
+            if !known.contains(link.as_str()) {
+                continue;
+            }
+            let (a, b) = if t.id.as_str() < link.as_str() {
+                (t.id.clone(), link.clone())
+            } else {
+                (link.clone(), t.id.clone())
+            };
+            if !edges.iter().any(|e| e.source == a && e.target == b) {
+                edges.push(GraphEdge { source: a, target: b });
+            }
+        }
+    }
+    edges
+}
+
+#[tauri::command]
+fn get_graph() -> Result<Graph, String> {
+    let dir = ensure_data_dir()?;
+    let tickets = load_all_tickets(&dir)?;
+
+    let nodes: Vec<GraphNode> = tickets
+        .iter()
+        .map(|t| GraphNode {
+            id: t.id.clone(),
+            title: t.title.clone(),
+            status: t.status.clone(),
+            priority: t.priority.clone(),
+            tags: t.tags.clone(),
+            filename: t.filename.clone(),
+        })
+        .collect();
+
+    let edges = build_edges(&tickets);
+
+    Ok(Graph { nodes, edges })
 }
 
 // ----- git config commands (Fase 2) -----
@@ -1858,7 +2058,237 @@ pub fn run() {
             add_project,
             remove_project,
             switch_project,
+            // Graph (Fase 6F)
+            link_tickets,
+            unlink_tickets,
+            get_graph,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("gitteam-test-{}-{}", std::process::id(), name));
+        p
+    }
+
+    fn sample_ticket(links: Vec<String>) -> Ticket {
+        Ticket {
+            id: "TKT-1041".to_string(),
+            title: "Graph links".to_string(),
+            status: "backlog".to_string(),
+            assignee: None,
+            priority: "medium".to_string(),
+            tags: vec!["ui".to_string()],
+            links,
+            last_updated: "2026-01-01T00:00:00Z".to_string(),
+            body: "Body text\n".to_string(),
+            filename: "TKT-1041-graph-links.md".to_string(),
+            filepath: String::new(),
+        }
+    }
+
+    #[test]
+    fn frontmatter_round_trip_preserves_links() {
+        let path = temp_path("links.md");
+        let original = sample_ticket(vec!["TKT-1039".to_string(), "TKT-1000".to_string()]);
+        fs::write(&path, render_frontmatter(&original)).unwrap();
+
+        let parsed = parse_ticket_file(&path).unwrap();
+        assert_eq!(parsed.links, vec!["TKT-1039".to_string(), "TKT-1000".to_string()]);
+        assert_eq!(parsed.id, "TKT-1041");
+        assert_eq!(parsed.tags, vec!["ui".to_string()]);
+        // `Matter::parse` trims the trailing newline from the body.
+        assert_eq!(parsed.body, "Body text");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn frontmatter_without_links_omits_the_key_and_parses_as_empty() {
+        let path = temp_path("nolinks.md");
+        let content = render_frontmatter(&sample_ticket(vec![]));
+        assert!(
+            !content.contains("links:"),
+            "a ticket with no links must not gain a links key:\n{}",
+            content
+        );
+        fs::write(&path, content).unwrap();
+
+        let parsed = parse_ticket_file(&path).unwrap();
+        assert!(parsed.links.is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Files written before Fase 6F have no `links` key at all — they must
+    /// still parse cleanly.
+    #[test]
+    fn legacy_frontmatter_without_links_key_parses() {
+        let path = temp_path("legacy.md");
+        let legacy = "---\nid: \"TKT-1000\"\ntitle: \"Legacy\"\nstatus: \"backlog\"\n\
+assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T00:00:00Z\"\n---\n\nOld body";
+        fs::write(&path, legacy).unwrap();
+
+        let parsed = parse_ticket_file(&path).unwrap();
+        assert!(parsed.links.is_empty());
+        assert_eq!(parsed.title, "Legacy");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn normalize_links_uppercases_dedupes_and_drops_self() {
+        let input = vec![
+            " tkt-1 ".to_string(),
+            "TKT-1".to_string(),
+            "TKT-1041".to_string(),
+            "".to_string(),
+            "TKT-2".to_string(),
+        ];
+        assert_eq!(
+            normalize_links(&input, "TKT-1041"),
+            vec!["TKT-1".to_string(), "TKT-2".to_string()]
+        );
+    }
+
+    fn ticket_with(id: &str, links: &[&str]) -> Ticket {
+        let mut t = sample_ticket(links.iter().map(|s| s.to_string()).collect());
+        t.id = id.to_string();
+        t
+    }
+
+    #[test]
+    fn build_edges_collapses_reciprocal_links() {
+        let a = ticket_with("TKT-1", &["TKT-2"]);
+        let b = ticket_with("TKT-2", &["TKT-1"]);
+        let edges = build_edges(&[a, b]);
+        assert_eq!(edges.len(), 1, "A→B and B→A must be one edge: {:?}", edges);
+    }
+
+    #[test]
+    fn build_edges_drops_links_to_unknown_tickets() {
+        let a = ticket_with("TKT-1", &["TKT-999"]);
+        assert!(build_edges(&[a]).is_empty());
+    }
+
+    #[test]
+    fn build_edges_keeps_distinct_pairs() {
+        let a = ticket_with("TKT-1", &["TKT-2", "TKT-3"]);
+        let b = ticket_with("TKT-2", &[]);
+        let c = ticket_with("TKT-3", &[]);
+        assert_eq!(build_edges(&[a, b, c]).len(), 2);
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("gitteam-test-dir-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    fn write_ticket(dir: &Path, id: &str, links: &[&str]) {
+        let mut t = sample_ticket(links.iter().map(|s| s.to_string()).collect());
+        t.id = id.to_string();
+        t.filename = format!("{}.md", id);
+        fs::write(dir.join(&t.filename), render_frontmatter(&t)).unwrap();
+    }
+
+    #[test]
+    fn link_in_dir_persists_the_link_and_the_graph_sees_the_edge() {
+        let dir = unique_temp_dir("link");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        let updated = link_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+        assert_eq!(updated.links, vec!["TKT-2".to_string()]);
+
+        // Read back from disk so this proves persistence, not just the return.
+        let edges = build_edges(&load_all_tickets(&dir).unwrap());
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source, "TKT-1");
+        assert_eq!(edges[0].target, "TKT-2");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_in_dir_is_idempotent() {
+        let dir = unique_temp_dir("link-idempotent");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        link_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+        link_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+
+        let tickets = load_all_tickets(&dir).unwrap();
+        let source = tickets.iter().find(|t| t.id == "TKT-1").unwrap();
+        assert_eq!(source.links, vec!["TKT-2".to_string()]);
+        assert_eq!(build_edges(&tickets).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_in_dir_rejects_an_unknown_target_without_touching_the_source() {
+        let dir = unique_temp_dir("link-unknown");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+
+        let before = fs::read_to_string(dir.join("TKT-1.md")).unwrap();
+        assert!(link_in_dir(&dir, "TKT-1", "TKT-999").is_err());
+        let after = fs::read_to_string(dir.join("TKT-1.md")).unwrap();
+        assert_eq!(before, after, "a rejected link must not rewrite the file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_in_dir_rejects_a_self_link() {
+        let dir = unique_temp_dir("link-self");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &[]);
+        assert!(link_in_dir(&dir, "TKT-1", "TKT-1").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unlink_in_dir_removes_the_link_from_disk() {
+        let dir = unique_temp_dir("unlink");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &["TKT-2"]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        let updated = unlink_in_dir(&dir, "TKT-1", "TKT-2").unwrap();
+        assert!(updated.links.is_empty());
+        assert!(build_edges(&load_all_tickets(&dir).unwrap()).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_ticket_preserves_links() {
+        // A plain edit goes through `update_ticket`, which must never drop the
+        // links that `link_tickets` owns.
+        let dir = unique_temp_dir("update-keeps-links");
+        fs::create_dir_all(&dir).unwrap();
+        write_ticket(&dir, "TKT-1", &["TKT-2"]);
+        write_ticket(&dir, "TKT-2", &[]);
+
+        let path = find_ticket_path_by_id(&dir, "TKT-1").unwrap();
+        let existing = parse_ticket_file(&path).unwrap();
+        let updated = Ticket {
+            title: "Renamed".to_string(),
+            last_updated: now_iso(),
+            links: existing.links,
+            ..existing
+        };
+        atomic_write(&path, &render_frontmatter(&updated)).unwrap();
+
+        let reread = parse_ticket_file(&path).unwrap();
+        assert_eq!(reread.title, "Renamed");
+        assert_eq!(reread.links, vec!["TKT-2".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

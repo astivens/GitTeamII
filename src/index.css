@@ -796,3 +796,147 @@ body {
 .filter-clear:hover {
   color: var(--fg);
 }
+
+/* View switcher (AppHeader) — segmented Board / Graph control */
+.view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.view-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 4px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms;
+}
+.view-toggle button:hover {
+  color: var(--fg);
+}
+.view-toggle button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Graph view (GraphView) */
+.graph-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.graph-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+.graph-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 8px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg-subtle);
+}
+.graph-search input {
+  width: 220px;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+}
+.graph-search input::placeholder {
+  color: var(--fg-subtle);
+}
+.graph-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-subtle);
+}
+.graph-canvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: block;
+  background-color: var(--bg);
+  /* Dotted canvas texture, the way Obsidian's graph pane reads. */
+  background-image: radial-gradient(var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
+  touch-action: none;
+  cursor: grab;
+}
+.graph-canvas:active {
+  cursor: grabbing;
+}
+.graph-node circle {
+  transition: stroke 120ms;
+}
+.graph-node:hover circle {
+  stroke: var(--accent);
+}
+.graph-label {
+  font-family: var(--font-mono);
+  user-select: none;
+  pointer-events: none;
+}
+.graph-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-8);
+  text-align: center;
+}
+
+/* Linked-tickets editor (TicketModal) */
+.link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 4px 2px 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.link-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.link-chip button:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+}

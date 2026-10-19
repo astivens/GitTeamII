@@ -4,6 +4,8 @@ import {
   AlertTriangle,
   Check,
   HelpCircle,
+  LayoutGrid,
+  Network,
   Plug,
   Plus,
   RefreshCw,
@@ -42,6 +44,8 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   const removeActiveProject = useTicketsStore((s) => s.removeActiveProject);
   const openPalette = useTicketsStore((s) => s.openPalette);
   const openHelp = useTicketsStore((s) => s.openHelp);
+  const viewMode = useTicketsStore((s) => s.viewMode);
+  const setViewMode = useTicketsStore((s) => s.setViewMode);
 
   const relativeTime = useMemo(
     () => formatRelativeTime(lastSyncedAt),
@@ -117,6 +121,26 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
       <div className="flex items-center gap-3">
         <BrandLockup size={24} />
         {indicator}
+        <div className="view-toggle" role="group" aria-label="View">
+          <button
+            type="button"
+            aria-pressed={viewMode === "board"}
+            onClick={() => setViewMode("board")}
+            title="Board view (g then k)"
+          >
+            <LayoutGrid size={13} />
+            Board
+          </button>
+          <button
+            type="button"
+            aria-pressed={viewMode === "graph"}
+            onClick={() => setViewMode("graph")}
+            title="Graph view (g then g)"
+          >
+            <Network size={13} />
+            Graph
+          </button>
+        </div>
       </div>
       <div className="flex items-center gap-2">
         {/* Search button — opens the command palette and doubles as a discoverability hint. */}

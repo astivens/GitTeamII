@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as api from "../lib/tauri";
 import { pushToast } from "../lib/toast";
 import type { CreateTicketInput, Ticket, TicketStatus } from "../types/ticket";
+import type { Graph } from "../types/graph";
 import type {
   AddProjectInput,
   GitConfig,
@@ -86,6 +87,10 @@ interface TicketsState {
   /** Transient: true right after a fresh setup, cleared on first create/update. */
   justSetup: boolean;
 
+  // Fase 6 — view mode
+  viewMode: "board" | "graph";
+  setViewMode: (mode: "board" | "graph") => void;
+
   initialize: () => Promise<void>;
   refresh: () => Promise<void>;
   create: (input: CreateTicketInput) => Promise<Ticket>;
@@ -101,6 +106,12 @@ interface TicketsState {
   removeProject: (id: string) => Promise<void>;
   removeActiveProject: () => Promise<void>;
   switchProject: (id: string) => Promise<Project>;
+
+  // Graph (Fase 6F)
+  graph: Graph | null;
+  loadGraph: () => Promise<void>;
+  linkTickets: (from: string, to: string) => Promise<void>;
+  unlinkTickets: (from: string, to: string) => Promise<void>;
 
   // Sync actions
   syncNow: () => Promise<void>;
@@ -202,6 +213,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     projects: [],
     activeProject: null,
 
+    graph: null,
+
     // Deprecated — derived from activeProject in loadActiveProject / addProject.
     dataDir: null,
     gitConfig: null,
@@ -219,6 +232,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     helpOpen: false,
     statusFilter: "all",
     justSetup: false,
+
+    viewMode: "board",
 
     initialize: async () => {
       set({ loading: true, error: null });
@@ -554,6 +569,38 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       return project;
     },
 
+    loadGraph: async () => {
+      try {
+        const graph = await api.getGraph();
+        set({ graph });
+      } catch (e) {
+        pushToast(
+          `Could not build graph: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+      }
+    },
+
+    linkTickets: async (from, to) => {
+      const ticket = await api.linkTickets(from, to);
+      await get().refresh();
+      await get().loadGraph();
+      const { gitConfig } = get();
+      if (gitConfig) {
+        commitTicketChange(ticket.filename, "link", gitConfig);
+      }
+    },
+
+    unlinkTickets: async (from, to) => {
+      const ticket = await api.unlinkTickets(from, to);
+      await get().refresh();
+      await get().loadGraph();
+      const { gitConfig } = get();
+      if (gitConfig) {
+        commitTicketChange(ticket.filename, "unlink", gitConfig);
+      }
+    },
+
     syncNow: async () => {
       const { gitConfig } = get();
       if (!gitConfig) return;
@@ -704,6 +751,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     setStatusFilter: (filter) => set({ statusFilter: filter }),
     markJustSetup: () => set({ justSetup: true }),
     clearJustSetup: () => set({ justSetup: false }),
+    setViewMode: (mode) => set({ viewMode: mode }),
   };
 });
 

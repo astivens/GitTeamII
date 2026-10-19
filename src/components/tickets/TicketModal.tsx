@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
@@ -64,21 +65,35 @@ const EMPTY: FormState = {
 export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketModalProps) {
   const [state, setState] = useState<FormState>(EMPTY);
   const [saving, setSaving] = useState(false);
+  const [linkInput, setLinkInput] = useState("");
+  const [linkBusy, setLinkBusy] = useState(false);
   const create = useTicketsStore((s) => s.create);
   const update = useTicketsStore((s) => s.update);
+  const linkTickets = useTicketsStore((s) => s.linkTickets);
+  const unlinkTickets = useTicketsStore((s) => s.unlinkTickets);
 
   const setLastViewedId = useTicketsStore((s) => s.setLastViewedId);
 
+  // The `ticket` prop is re-derived from the store on every render (so link
+  // changes show up live), which means its identity changes often. The form is
+  // therefore only re-seeded when the modal opens or the *ticket id* changes —
+  // never on a plain refresh, which would discard edits in progress.
+  const latestTicket = useRef<Ticket | null>(ticket);
+  latestTicket.current = ticket;
+  const ticketId = ticket?.id ?? null;
+
   useEffect(() => {
     if (open) {
-      setState(ticket ? fromTicket(ticket) : EMPTY);
+      const current = latestTicket.current;
+      setState(current ? fromTicket(current) : EMPTY);
+      setLinkInput("");
       // Track which ticket is currently viewed so the Y shortcut can yank its ID.
-      setLastViewedId(ticket ? ticket.id : null);
+      setLastViewedId(current ? current.id : null);
     }
     return () => {
       if (open) setLastViewedId(null);
     };
-  }, [open, ticket, setLastViewedId]);
+  }, [open, ticketId, setLastViewedId]);
 
   const updateField = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setState((prev) => ({ ...prev, [key]: value }));
@@ -115,6 +130,39 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
       );
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleLink = async () => {
+    if (!ticket) return;
+    const target = linkInput.trim().toUpperCase();
+    if (target.length === 0) return;
+    setLinkBusy(true);
+    try {
+      await linkTickets(ticket.id, target);
+      setLinkInput("");
+    } catch (e) {
+      pushToast(
+        `Could not link: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setLinkBusy(false);
+    }
+  };
+
+  const handleUnlink = async (target: string) => {
+    if (!ticket) return;
+    setLinkBusy(true);
+    try {
+      await unlinkTickets(ticket.id, target);
+    } catch (e) {
+      pushToast(
+        `Could not unlink: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    } finally {
+      setLinkBusy(false);
     }
   };
 
@@ -195,6 +243,63 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
           placeholder="comma, separated"
         />
       </div>
+      {mode === "edit" && ticket ? (
+        <div className="flex flex-col gap-2">
+          <span
+            className="text-fg-muted text-xs font-medium"
+            style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}
+          >
+            Linked tickets
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {ticket.links.length === 0 ? (
+              <span className="text-fg-subtle text-xs">
+                No links yet — add a TKT id to draw an edge in the graph.
+              </span>
+            ) : (
+              ticket.links.map((link) => (
+                <span key={link} className="link-chip">
+                  {link}
+                  <button
+                    type="button"
+                    onClick={() => void handleUnlink(link)}
+                    aria-label={`Unlink ${link}`}
+                    disabled={linkBusy}
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              ))
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              className="input flex-1 font-mono text-sm"
+              value={linkInput}
+              onChange={(e) => setLinkInput(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void handleLink();
+                }
+              }}
+              placeholder="TKT-1041"
+              spellCheck={false}
+              disabled={linkBusy}
+            />
+            <Button
+              variant="outline"
+              onClick={() => void handleLink()}
+              disabled={linkBusy || linkInput.trim().length === 0}
+            >
+              Link
+            </Button>
+          </div>
+          <span className="text-fg-subtle text-xs">
+            Links save immediately — they are what the graph draws.
+          </span>
+        </div>
+      ) : null}
       <label className="flex flex-col gap-1 text-sm">
         <span
           className="text-fg-muted text-xs font-medium"

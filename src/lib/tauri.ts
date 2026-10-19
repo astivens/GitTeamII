@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CreateTicketInput, Ticket } from "../types/ticket";
+import type { Graph } from "../types/graph";
 import type {
   AddProjectInput,
   CommitResult,
@@ -152,4 +153,18 @@ export async function gitStopWatcher(): Promise<void> {
 
 export async function gitCurrentRemoteSha(): Promise<string | null> {
   return invoke<string | null>("git_current_remote_sha");
+}
+
+// ----- graph (Fase 6F) -----
+
+export async function linkTickets(from: string, to: string): Promise<Ticket> {
+  return invoke<Ticket>("link_tickets", { from, to });
+}
+
+export async function unlinkTickets(from: string, to: string): Promise<Ticket> {
+  return invoke<Ticket>("unlink_tickets", { from, to });
+}
+
+export async function getGraph(): Promise<Graph> {
+  return invoke<Graph>("get_graph");
 }

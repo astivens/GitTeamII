@@ -8,6 +8,7 @@ import {
   OnboardingState,
 } from "./components/layout/EmptyState";
 import { KanbanBoard } from "./components/tickets/KanbanBoard";
+import { GraphView } from "./components/graph/GraphView";
 import { TicketModal } from "./components/tickets/TicketModal";
 import { Button } from "./components/ui/Button";
 import { CommandPalette } from "./components/ui/CommandPalette";
@@ -43,6 +44,7 @@ function App() {
   const loadProjects = useTicketsStore((s) => s.loadProjects);
   const syncError = useTicketsStore((s) => s.syncError);
   const justSetup = useTicketsStore((s) => s.justSetup);
+  const viewMode = useTicketsStore((s) => s.viewMode);
 
   const [modal, setModal] = useState<ModalState>({ kind: "closed" });
   const [conflictModalOpen, setConflictModalOpen] = useState(false);
@@ -136,6 +138,17 @@ function App() {
   const onNew = () => setModal({ kind: "create" });
   const onSelect = (t: Ticket) => setModal({ kind: "edit", ticket: t });
   const onClose = () => setModal({ kind: "closed" });
+
+  // Re-read the open ticket from the store on every render so changes that
+  // round-trip through the backend while the modal is open (linking tickets,
+  // an external sync) are reflected immediately instead of showing the stale
+  // snapshot taken when the modal was opened.
+  const modalTicket = useMemo(() => {
+    if (modal.kind !== "edit") return null;
+    return (
+      tickets.find((t) => t.filename === modal.ticket.filename) ?? modal.ticket
+    );
+  }, [modal, tickets]);
 
   // Wire the global "new ticket" shortcut (the `n` key) to the same handler.
   useEffect(() => {
@@ -243,6 +256,13 @@ function App() {
           ) : (
             <EmptyState onCreate={onNew} />
           )
+        ) : viewMode === "graph" ? (
+          <GraphView
+            onOpenTicket={(filename) => {
+              const t = tickets.find((x) => x.filename === filename);
+              if (t) onSelect(t);
+            }}
+          />
         ) : (
           <KanbanBoard tickets={tickets} onSelect={onSelect} />
         )}
@@ -251,7 +271,7 @@ function App() {
       <TicketModal
         open={modal.kind !== "closed"}
         mode={modal.kind === "create" ? "create" : "edit"}
-        ticket={modal.kind === "edit" ? modal.ticket : null}
+        ticket={modalTicket}
         onClose={onClose}
         onDelete={
           modal.kind === "edit" ? () => void onDelete(modal.ticket) : null
