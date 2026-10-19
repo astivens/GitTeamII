@@ -14,7 +14,22 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 /**
- * Register the global keyboard shortcuts (Cmd+K, n, /, ?).
+ * Flash a transient toast-like inline confirmation when Y copies an ID.
+ * Uses the same bus as the rest of the UI; tiny so it doesn't depend on
+ * importing the toast module here (kept dependency-light).
+ */
+function flashYankToast(label: string) {
+  window.dispatchEvent(new CustomEvent("gitteam:flash", { detail: label }));
+}
+
+/**
+ * Register the global keyboard shortcuts:
+ *   ⌘K          toggle command palette
+ *   N (uppercase)  new ticket
+ *   /           focus palette search
+ *   ?           toggle help overlay
+ *   Y (uppercase)  yank current ticket ID to clipboard
+ *
  * Mount once at the app root.
  *
  * Esc is NOT bound here — individual modals own their own Esc handler because
@@ -70,6 +85,23 @@ export function useGlobalShortcuts(): void {
         const { helpOpen, openHelp, closeHelp } = useTicketsStore.getState();
         if (helpOpen) closeHelp();
         else openHelp();
+        return;
+      }
+
+      // Y — yank current ticket ID. We use the LAST VIEWED ticket, tracked in
+      // the store. If there is none, the keypress is a no-op (the user hasn't
+      // opened any ticket yet).
+      if (e.key === "y" || e.key === "Y") {
+        const { lastViewedId } = useTicketsStore.getState();
+        if (lastViewedId) {
+          e.preventDefault();
+          navigator.clipboard
+            .writeText(lastViewedId)
+            .then(() => flashYankToast(`Yanked ${lastViewedId}`))
+            .catch(() => {
+              // Silent — the in-card Y button still works as a fallback.
+            });
+        }
         return;
       }
     }

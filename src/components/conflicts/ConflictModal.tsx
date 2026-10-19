@@ -190,7 +190,7 @@ function ConflictList({ conflicts, onOpen, busy }: ConflictListProps) {
   if (conflicts.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-        <FileWarning size={32} className="text-status-done" />
+        <FileWarning size={32} style={{ color: "var(--status-done)" }} />
         <p className="text-sm text-fg-muted">
           All conflicts resolved. Click <strong>Done</strong> below to finish
           the rebase.
@@ -199,7 +199,7 @@ function ConflictList({ conflicts, onOpen, busy }: ConflictListProps) {
     );
   }
   return (
-    <ul className="divide-y divide-border rounded-md border border-border bg-bg-subtle">
+    <ul className="divide-border rounded-md border bg-bg-subtle">
       {conflicts.map((filename) => (
         <li
           key={filename}
@@ -263,12 +263,23 @@ function ConflictResolveView({
       <p className="font-mono text-xs text-fg-subtle break-all">{filename}</p>
 
       {previewError ? (
-        <p className="text-xs text-priority-urgent font-mono whitespace-pre-wrap">
+        <p
+          className="text-xs font-mono whitespace-pre-wrap"
+          style={{ color: "var(--priority-urgent)" }}
+        >
           Could not load preview: {previewError}
         </p>
       ) : null}
 
-      <div className="grid grid-cols-2 gap-3 min-h-[280px] max-h-[50vh]">
+      <div
+        className="gap-3"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(2, 1fr)",
+          minHeight: 280,
+          maxHeight: "50vh",
+        }}
+      >
         <PreviewPanel
           title="Local (your changes)"
           content={localContent}
@@ -314,13 +325,15 @@ interface PreviewPanelProps {
 
 function PreviewPanel({ title, content }: PreviewPanelProps) {
   return (
-    <div className="flex flex-col rounded-md border border-border bg-bg-subtle overflow-hidden">
-      <div className="px-3 py-1.5 border-b border-border text-xs font-medium text-fg-muted bg-bg-elevated">
+    <div className="flex flex-col rounded-md border bg-bg-subtle overflow-hidden">
+      <div className="px-3 py-1.5 border-b text-xs font-medium text-fg-muted bg-bg-elevated">
         {title}
       </div>
       <div className="flex-1 overflow-auto p-3 text-sm">
         {content.length === 0 ? (
-          <p className="text-fg-subtle italic">Empty</p>
+          <p className="text-fg-subtle" style={{ fontStyle: "italic" }}>
+            Empty
+          </p>
         ) : (
           <div className="markdown-body">
             <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>

@@ -25,23 +25,36 @@ export function Modal({ open, onClose, title, children, footer, wide }: ModalPro
 
   if (!open) return null;
 
-  const widthClass = wide ? "max-w-[1100px]" : "max-w-[720px]";
-
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+      className="flex items-center justify-center p-4"
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 40,
+        background: "rgba(0, 0, 0, 0.6)",
+      }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
-        className={`card w-full ${widthClass} max-h-[85vh] flex flex-col overflow-hidden shadow-elevated`}
+        className="card w-full flex flex-col overflow-hidden"
+        style={{
+          maxWidth: wide ? 1100 : 720,
+          maxHeight: "85vh",
+          boxShadow: "var(--shadow-elevated)",
+        }}
       >
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <div className="flex items-center justify-between px-4 py-3 border-b">
           <h2 className="text-base font-semibold text-fg">{title}</h2>
           <button
             type="button"
-            className="btn-ghost p-1"
+            className="btn-ghost"
+            style={{ padding: 4 }}
             aria-label="Close"
             onClick={onClose}
           >
@@ -50,7 +63,7 @@ export function Modal({ open, onClose, title, children, footer, wide }: ModalPro
         </div>
         <div className="flex-1 overflow-auto p-4 space-y-4">{children}</div>
         {footer ? (
-          <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
+          <div className="flex items-center justify-end gap-2 px-4 py-3 border-t">
             {footer}
           </div>
         ) : null}

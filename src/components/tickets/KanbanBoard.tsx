@@ -14,14 +14,14 @@ const ALL_COLUMNS: Array<{
   label: string;
   dotClass: string;
 }> = [
-  { status: "backlog", label: "Backlog", dotClass: "bg-status-backlog" },
+  { status: "backlog", label: "Backlog", dotClass: "status-dot-backlog" },
   {
     status: "in-progress",
     label: "In Progress",
-    dotClass: "bg-status-in-progress",
+    dotClass: "status-dot-progress",
   },
-  { status: "review", label: "Review", dotClass: "bg-status-review" },
-  { status: "done", label: "Done", dotClass: "bg-status-done" },
+  { status: "review", label: "Review", dotClass: "status-dot-review" },
+  { status: "done", label: "Done", dotClass: "status-dot-done" },
 ];
 
 const FILTER_LABEL: Record<TicketStatus, string> = {
@@ -59,7 +59,7 @@ export function KanbanBoard({ tickets, onSelect }: KanbanBoardProps) {
   return (
     <div className="flex h-full flex-col">
       {statusFilter !== "all" ? (
-        <div className="flex items-center justify-between px-4 py-2 text-xs text-fg-muted border-b border-border bg-bg">
+        <div className="flex items-center justify-between px-4 py-2 text-xs text-fg-muted border-b bg-bg">
           <span>
             Showing:{" "}
             <span className="text-fg font-medium">
@@ -68,7 +68,7 @@ export function KanbanBoard({ tickets, onSelect }: KanbanBoardProps) {
           </span>
           <button
             type="button"
-            className="flex items-center gap-1 text-fg-muted hover:text-fg"
+            className="filter-clear"
             onClick={() => setStatusFilter("all")}
           >
             <X size={12} />

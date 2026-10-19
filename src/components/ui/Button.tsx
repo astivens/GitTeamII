@@ -1,33 +1,22 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
-type Variant = "primary" | "ghost" | "outline";
+type Variant = "primary" | "ghost" | "outline" | "danger";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   children: ReactNode;
 }
 
-function variantClass(v: Variant): string {
-  switch (v) {
-    case "primary":
-      return "btn-primary";
-    case "outline":
-      return "btn-outline";
-    case "ghost":
-    default:
-      return "btn-ghost";
-  }
-}
-
 export function Button({
   variant = "ghost",
-  className,
+  className = "",
   children,
   ...props
 }: ButtonProps) {
+  const variantClass = `btn-${variant}`;
   return (
     <button
-      className={`${variantClass(variant)} ${className ?? ""}`}
+      className={`btn ${variantClass} ${className}`}
       {...props}
     >
       {children}

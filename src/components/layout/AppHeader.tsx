@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Check,
   HelpCircle,
-  Loader2,
   Plug,
   Plus,
   RefreshCw,
@@ -12,6 +11,7 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Avatar } from "../ui/Avatar";
+import { BrandLockup } from "../ui/Brand";
 import { useTicketsStore } from "../../store/tickets";
 
 interface AppHeaderProps {
@@ -55,15 +55,26 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
     switch (syncStatus) {
       case "syncing":
         return (
-          <span className="flex items-center gap-1 text-fg-muted text-xs">
-            <Loader2 size={14} className="animate-spin" />
+          <span className="flex items-center gap-1.5 text-fg-muted text-xs">
+            <span className="relative inline-flex shrink-0">
+              <span
+                className="inline-block rounded-full"
+                style={{
+                  width: 8,
+                  height: 8,
+                  background: "var(--status-progress)",
+                }}
+              />
+              {/* Soft pulse ring — same color, expanding outward, fading out */}
+              <span className="sync-pulse" />
+            </span>
             Syncing
           </span>
         );
       case "synced":
         return (
           <span className="flex items-center gap-1 text-xs">
-            <Check size={14} className="text-status-done" />
+            <Check size={14} style={{ color: "var(--status-done)" }} />
             <span className="text-fg-muted">Synced</span>
             {relativeTime ? (
               <span className="text-fg-subtle">· {relativeTime}</span>
@@ -73,7 +84,8 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
       case "error":
         return (
           <span
-            className="flex items-center gap-1 text-priority-urgent text-xs"
+            className="flex items-center gap-1 text-xs"
+            style={{ color: "var(--priority-urgent)" }}
             title={syncError ?? "Sync error"}
           >
             <AlertCircle size={14} />
@@ -83,7 +95,8 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
       case "conflict":
         return (
           <span
-            className="flex items-center gap-1 text-priority-high text-xs"
+            className="flex items-center gap-1 text-xs"
+            style={{ color: "var(--priority-high)" }}
             title={syncError ?? "Sync conflict"}
           >
             <AlertTriangle size={14} />
@@ -101,11 +114,9 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   })();
 
   return (
-    <header className="h-14 shrink-0 flex items-center justify-between px-4 border-b border-border bg-bg-subtle">
+    <header className="h-14 shrink-0 flex items-center justify-between px-4 border-b bg-bg-subtle">
       <div className="flex items-center gap-3">
-        <span className="font-mono text-fg text-base font-semibold tracking-tight">
-          GitTeam
-        </span>
+        <BrandLockup size={24} />
         {indicator}
       </div>
       <div className="flex items-center gap-2">
@@ -113,7 +124,7 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
         <button
           type="button"
           onClick={openPalette}
-          className="flex items-center gap-2 rounded-md border border-border bg-bg px-2.5 py-1.5 text-sm text-fg-muted hover:text-fg hover:bg-bg-hover transition-colors"
+          className="search-trigger"
         >
           <Search size={14} />
           <span>Search…</span>
@@ -135,10 +146,10 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
             type="button"
             onClick={openHelp}
             title={gitConfig.git_user_name}
-            className="flex items-center gap-2 rounded-md px-1.5 py-1 text-fg-muted hover:bg-bg-hover hover:text-fg transition-colors"
+            className="user-chip"
           >
             <Avatar name={gitConfig.git_user_name} size={22} />
-            <span className="text-sm">{gitConfig.git_user_name}</span>
+            <span>{gitConfig.git_user_name}</span>
           </button>
         ) : null}
 
@@ -156,7 +167,8 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
         <button
           type="button"
           onClick={openHelp}
-          className="btn-ghost p-2"
+          className="btn-ghost"
+          style={{ padding: 8 }}
           aria-label="Keyboard shortcuts"
           title="Keyboard shortcuts (?)"
         >

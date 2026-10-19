@@ -21,7 +21,12 @@ export function ConflictBanner({ onResolve }: ConflictBannerProps) {
   return (
     <div
       role="alert"
-      className="flex items-center justify-between gap-3 px-4 py-2 border-b border-priority-high/30 bg-priority-high/10 text-priority-high"
+      className="flex items-center justify-between gap-3 px-4 py-2 border-b"
+      style={{
+        borderColor: "rgba(249, 115, 22, 0.3)",
+        background: "rgba(249, 115, 22, 0.1)",
+        color: "var(--priority-high)",
+      }}
     >
       <div className="flex items-center gap-2 text-sm font-medium">
         <AlertTriangle size={16} />
