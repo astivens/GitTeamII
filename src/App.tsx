@@ -94,6 +94,16 @@ function App() {
     }
   }, [activeProject, setupForcedFrom]);
 
+  // An invitation opens the SetupScreen, but only once the boot is over: until
+  // then there is no active project to remember, and forcing the screen with
+  // "nothing was active" makes the project that loads a moment later close it —
+  // which is losing the very invitation that opened the app. Same opener as the
+  // "Link new repository" CTA, so a successful join closes the screen.
+  useEffect(() => {
+    if (!inviteFromLink || !bootDone || setupForcedFrom !== null) return;
+    setSetupForcedFrom(activeProject?.id ?? "");
+  }, [inviteFromLink, bootDone, activeProject, setupForcedFrom]);
+
   // Window focus → auto-pull if synced and no pending local changes
   useEffect(() => {
     const onFocus = () => {
@@ -163,12 +173,10 @@ function App() {
         // same place that reads a pasted one.
         const intake = await gitteamLinkIntake(urls);
         if (intake.invite) {
-          // The same opener as the "Link new repository" CTA, so a successful
-          // join closes the screen instead of leaving it up.
+          // Keeping the link is all this does: which project was active when it
+          // arrived is decided by the effect below, which waits for the boot to
+          // finish. Reading it here would see a project that has not loaded yet.
           setInviteFromLink(intake.invite);
-          setSetupForcedFrom(
-            useTicketsStore.getState().activeProject?.id ?? "",
-          );
           return;
         }
         if (intake.not_an_invitation) {
