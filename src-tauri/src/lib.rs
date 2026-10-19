@@ -1186,15 +1186,29 @@ async fn setup_repo_inner(
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
         let mut cmd = Command::new("git");
         cmd.arg("clone").arg(&auth_url).arg(&dir);
-        let output = timeout(Duration::from_secs(60), cmd.output())
-            .await
-            .map_err(|_| "git clone timed out after 60s".to_string())?
-            .map_err(|e| format!("git clone failed to spawn: {}", e))?;
+        // Cloning someone's real repository can legitimately take minutes: one
+        // with a committed node_modules runs to tens of thousands of files. The
+        // old 60s cap killed the clone mid-checkout, which left a complete
+        // object store next to a half-populated worktree — the state that
+        // afterwards reads as "everything was deleted".
+        let output = match timeout(Duration::from_secs(900), cmd.output()).await {
+            Err(_) => {
+                let _ = fs::remove_dir_all(&dir);
+                return Err(
+                    "git clone timed out after 900s. Check your connection and try again — the partial clone was removed."
+                        .to_string(),
+                );
+            }
+            Ok(Err(e)) => {
+                let _ = fs::remove_dir_all(&dir);
+                return Err(format!("git clone failed to spawn: {}", e));
+            }
+            Ok(Ok(output)) => output,
+        };
         if !output.status.success() {
-            return Err(format!(
-                "git clone failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let _ = fs::remove_dir_all(&dir);
+            return Err(format!("git clone failed: {}", stderr));
         }
     } else if !dir.join(".git").exists() {
         let mut cmd = Command::new("git");
@@ -1234,10 +1248,10 @@ async fn setup_repo_inner(
             return Err("git remote add failed".to_string());
         }
 
-        let output = run_git(&dir, &["fetch"], 60, None).await?;
+        let output = run_git(&dir, &["fetch"], 300, None).await?;
         let _ = output;
 
-        let reset_main = run_git(&dir, &["reset", "--hard", "origin/main"], 15, None).await;
+        let reset_main = run_git(&dir, &["reset", "--hard", "origin/main"], 60, None).await;
         if reset_main.is_err() {
             let reset_master = run_git(&dir, &["reset", "--hard", "origin/master"], 15, None).await;
             if reset_master.is_err() {
@@ -1257,12 +1271,12 @@ async fn setup_repo_inner(
             return Err("Data directory already initialized with a different repository. Please disconnect first.".to_string());
         }
 
-        run_git(&dir, &["fetch"], 60, None).await?;
+        run_git(&dir, &["fetch"], 300, None).await?;
 
         let pull_status = run_git(
             &dir,
             &["pull", "--rebase", "--autostash"],
-            30,
+            300,
             Some((&config.git_user_name, &config.git_user_email)),
         )
         .await;
@@ -1272,6 +1286,19 @@ async fn setup_repo_inner(
             }
             return Err(e);
         }
+    }
+
+    // Whichever path we took — fresh clone, init + fetch, or adopting an existing
+    // checkout — the worktree has to actually contain the tracked files. A
+    // half-populated checkout is not a usable project: every ticket write would
+    // look like a mass deletion, and one sync could publish it.
+    let missing = missing_tracked_files(&dir).await?;
+    if !missing.is_empty() {
+        return Err(format!(
+            "the local checkout is incomplete: {} tracked file(s) are missing from the worktree ({}). Disconnect this project and link it again to get a fresh clone.",
+            missing.len(),
+            preview_paths(&missing)
+        ));
     }
 
     save_pat(&pat)?;
@@ -1315,9 +1342,9 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
         return Err("Data directory is not a git repository. Please reconnect.".to_string());
     }
 
-    run_git(&dir, &["fetch"], 30, None).await?;
+    run_git(&dir, &["fetch"], 300, None).await?;
 
-    let count_output = run_git(&dir, &["log", "HEAD..@{u}", "--oneline"], 10, None)
+    let count_output = run_git(&dir, &["log", "HEAD..@{u}", "--oneline"], 60, None)
         .await
         .unwrap_or_default();
     let commits_pulled = if count_output.trim().is_empty() {
@@ -1326,10 +1353,12 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
         count_output.lines().count() as u32
     };
 
+    // A pull killed mid-rebase leaves the repository in a half-applied state, so
+    // this gets the same generous budget as the clone rather than a 30s cap.
     let pull = run_git(
         &dir,
         &["pull", "--rebase", "--autostash"],
-        30,
+        300,
         Some((&config.git_user_name, &config.git_user_email)),
     )
     .await;
@@ -1375,10 +1404,42 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     let upstream_check = run_git(
         &dir,
         &["rev-parse", "--abbrev-ref", "--symbolic", "@{u}"],
-        10,
+        30,
         None,
     )
     .await;
+
+    // Never publish a change that is not a ticket change. The range covers every
+    // commit this push would introduce, so a bad commit made earlier in the
+    // branch cannot slip through either — publishing tickets is the only thing
+    // this app is allowed to do with a repository it does not own.
+    let base = match &upstream_check {
+        Ok(upstream) => upstream.trim().to_string(),
+        Err(_) => run_git(&dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"], 30, None)
+            .await
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    };
+    if !base.is_empty() {
+        let range = format!("{}...HEAD", base);
+        let changed = run_git(&dir, &["diff", "--name-only", &range], 120, None)
+            .await
+            .unwrap_or_default();
+        let paths: Vec<String> = changed
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim().to_string())
+            .collect();
+        let foreign = foreign_paths(&paths);
+        if !foreign.is_empty() {
+            return Err(format!(
+                "refusing to push: this branch would change {} file(s) GitTeam does not own ({}). Fix the repository state manually before syncing.",
+                foreign.len(),
+                preview_paths(&foreign)
+            ));
+        }
+    }
 
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
     if upstream_check.is_err() {
@@ -1387,7 +1448,7 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
         cmd.args(&["push", "origin", "HEAD"]);
     }
 
-    let output = timeout(Duration::from_secs(60), cmd.output())
+    let output = timeout(Duration::from_secs(300), cmd.output())
         .await
         .map_err(|_| "git push timed out after 60s".to_string())?
         .map_err(|e| format!("git push failed to spawn: {}", e))?;
@@ -1405,6 +1466,75 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     Ok(PushResult { head_sha })
 }
 
+/// Is `name` a file GitTeam is allowed to stage, commit and push?
+///
+/// GitTeam owns ticket files and nothing else in the data repository. A ticket
+/// is a top-level `.md` file whose name carries the `TKT-` id prefix — exactly
+/// how `load_all_tickets` recognises one and how `create_ticket` names one.
+///
+/// This predicate is a safety boundary, so it stays deliberately narrow. A
+/// linked repository may be someone's real project: nested paths, other
+/// extensions and other root files belong to whoever else uses that repo, and a
+/// ticket save must never be able to stage their deletion.
+fn is_owned_ticket_path(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let Some(stem) = name.strip_suffix(".md") else {
+        return false;
+    };
+    let Some(rest) = stem.strip_prefix("TKT-") else {
+        return false;
+    };
+    matches!(rest.chars().next(), Some(c) if c.is_ascii_digit())
+}
+
+/// The members of `candidates` that GitTeam has no business touching.
+fn foreign_paths(candidates: &[String]) -> Vec<String> {
+    candidates
+        .iter()
+        .filter(|p| !is_owned_ticket_path(p))
+        .cloned()
+        .collect()
+}
+
+/// A short, human-readable sample of `paths` for error messages.
+fn preview_paths(paths: &[String]) -> String {
+    let mut shown: Vec<String> = paths.iter().take(3).cloned().collect();
+    if paths.len() > shown.len() {
+        shown.push(format!("+{} more", paths.len() - shown.len()));
+    }
+    shown.join(", ")
+}
+
+/// Parse `git status --porcelain` output and return the paths whose *worktree*
+/// copy is gone (second status column is `D`).
+///
+/// A `git clone` that is killed part-way leaves a complete object store next to
+/// a half-populated worktree, and every subsequent command then reads as
+/// "everything was deleted". Detecting that is what keeps a broken checkout from
+/// being adopted as a working project.
+fn deleted_in_worktree_from_porcelain(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|l| l.len() > 2 && l.as_bytes()[1] == b'D')
+        .map(|l| l.chars().skip(3).collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Tracked files that exist in `HEAD` but are missing from the worktree.
+async fn missing_tracked_files(dir: &Path) -> Result<Vec<String>, String> {
+    let output = run_git(
+        dir,
+        &["status", "--porcelain", "--untracked-files=no"],
+        120,
+        None,
+    )
+    .await?;
+    Ok(deleted_in_worktree_from_porcelain(&output))
+}
+
 #[tauri::command]
 async fn git_commit_ticket(
     filename: String,
@@ -1416,16 +1546,28 @@ async fn git_commit_ticket(
         return Err("Data directory is not a git repository. Please reconnect.".to_string());
     }
 
-    let add = run_git(&dir, &["add", &filename], 10, None).await;
+    // A ticket save may only ever touch a ticket file. Without this, whatever
+    // else happens to be staged in the repository — a stale index, someone
+    // else's code — would ride along into the commit and then into the push.
+    if !is_owned_ticket_path(&filename) {
+        return Err(format!(
+            "refusing to commit {}: GitTeam only commits ticket files (TKT-*.md at the repository root)",
+            filename
+        ));
+    }
+
+    let add = run_git(&dir, &["add", "--", &filename], 60, None).await;
     if let Err(e) = add {
         return Err(format!("git add failed: {}", e));
     }
 
     let head_before = git_head(&dir).await.unwrap_or_default();
 
+    // Scope both the check and the commit to this ticket so unrelated staged
+    // work stays exactly where it is instead of being swept into the commit.
     let mut diff_cmd = build_git_cmd(&dir);
-    diff_cmd.args(&["diff", "--cached", "--quiet"]);
-    let diff_status = timeout(Duration::from_secs(10), diff_cmd.status())
+    diff_cmd.args(&["diff", "--cached", "--quiet", "--", &filename]);
+    let diff_status = timeout(Duration::from_secs(60), diff_cmd.status())
         .await
         .map_err(|_| "git diff --cached timed out".to_string())?
         .map_err(|e| format!("git diff --cached failed: {}", e))?;
@@ -1443,8 +1585,8 @@ async fn git_commit_ticket(
 
     let commit = run_git(
         &dir,
-        &["commit", "-m", &commit_msg],
-        15,
+        &["commit", "-m", &commit_msg, "--", &filename],
+        60,
         Some((&config.git_user_name, &config.git_user_email)),
     )
     .await;
@@ -1511,7 +1653,7 @@ async fn git_status() -> Result<GitStatus, String> {
         Err(_) => 0,
     };
 
-    let status_output = run_git(&dir, &["status", "--porcelain"], 10, None)
+    let status_output = run_git(&dir, &["status", "--porcelain"], 120, None)
         .await
         .unwrap_or_default();
     let uncommitted_count = if status_output.trim().is_empty() {
@@ -1529,13 +1671,18 @@ async fn git_status() -> Result<GitStatus, String> {
     })
 }
 
+/// Local changes GitTeam is allowed to commit: ticket files only.
+///
+/// The caller loops over this list and commits each entry, so filtering here is
+/// what stops a dirty repository — or a stale index that reports other people's
+/// files as deleted — from being swept into ticket commits and pushed.
 #[tauri::command]
 async fn git_list_local_changes() -> Result<Vec<String>, String> {
     let dir = ensure_data_dir()?;
     if !dir.join(".git").exists() {
         return Ok(vec![]);
     }
-    let output = run_git(&dir, &["status", "--porcelain"], 10, None)
+    let output = run_git(&dir, &["status", "--porcelain"], 120, None)
         .await
         .unwrap_or_default();
     let files: Vec<String> = output
@@ -1543,6 +1690,7 @@ async fn git_list_local_changes() -> Result<Vec<String>, String> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.chars().skip(3).collect::<String>().trim().to_string())
         .filter(|s| !s.is_empty())
+        .filter(|s| is_owned_ticket_path(s))
         .collect();
     Ok(files)
 }
@@ -1557,7 +1705,7 @@ async fn git_list_conflicts() -> Result<Vec<String>, String> {
     if !dir.join(".git").exists() {
         return Ok(vec![]);
     }
-    let output = run_git(&dir, &["diff", "--name-only", "--diff-filter=U"], 10, None)
+    let output = run_git(&dir, &["diff", "--name-only", "--diff-filter=U"], 120, None)
         .await
         .unwrap_or_default();
     let files: Vec<String> = output
@@ -2290,5 +2438,67 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         assert_eq!(reread.title, "Renamed");
         assert_eq!(reread.links, vec!["TKT-2".to_string()]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owned_ticket_paths_accept_ticket_files_at_the_root() {
+        assert!(is_owned_ticket_path("TKT-1000-prueba-i.md"));
+        assert!(is_owned_ticket_path("TKT-1042-update-csv-parser-for-utf-16.md"));
+        assert!(is_owned_ticket_path("TKT-1.md"));
+    }
+
+    #[test]
+    fn owned_ticket_paths_reject_everything_git_team_does_not_own() {
+        for foreign in [
+            "AGENTS.md",
+            "README.md",
+            "architecture.md",
+            "BACKLOG.md",
+            ".env",
+            ".dockerignore",
+            "lims-web/package.json",
+            "lims-web/src/App.tsx",
+            "docs/01-Flujo.md",
+            "TKT-1000/notes.md",
+            "TKT-1000-prueba-i.txt",
+            "TKT-",
+            "",
+        ] {
+            assert!(
+                !is_owned_ticket_path(foreign),
+                "{} must not be treated as a ticket file",
+                foreign
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_paths_reports_only_the_offenders() {
+        let paths = vec![
+            "TKT-1000-a.md".to_string(),
+            ".env".to_string(),
+            "lims-web/src/App.tsx".to_string(),
+            "TKT-1001-b.md".to_string(),
+        ];
+        assert_eq!(
+            foreign_paths(&paths),
+            vec![".env".to_string(), "lims-web/src/App.tsx".to_string()]
+        );
+        assert!(foreign_paths(&["TKT-1001-b.md".to_string()]).is_empty());
+        assert!(foreign_paths(&[]).is_empty());
+    }
+
+    #[test]
+    fn porcelain_parser_finds_worktree_deletions_only() {
+        // ` D` is a file missing from the worktree — the signature of a checkout
+        // that never finished. `D ` is merely staged, `??` untracked, ` M` edited.
+        let output =
+            " D lims-web/src/App.tsx\nD  removed.md\n?? new.md\n M edited.md\nA  added.md\n";
+        assert_eq!(
+            deleted_in_worktree_from_porcelain(output),
+            vec!["lims-web/src/App.tsx".to_string()]
+        );
+        assert!(deleted_in_worktree_from_porcelain("").is_empty());
+        assert!(deleted_in_worktree_from_porcelain("?? only-untracked.md\n").is_empty());
     }
 }
