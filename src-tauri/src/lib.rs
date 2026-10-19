@@ -3113,6 +3113,149 @@ async fn board_create(input: BoardCreateInput) -> Result<Project, String> {
     })
 }
 
+// ----- Invitation links -----
+
+/// Where an invitation points. Built on one side of the app and read on the
+/// other, so both halves of the format live here and a round trip pins them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct InviteDetails {
+    pub repo_url: String,
+    pub board: Option<String>,
+    pub from: Option<String>,
+}
+
+const INVITE_PREFIX: &str = "gitteam://join";
+
+/// A repository url as it may appear in an invitation. Only an http(s) url can
+/// carry credentials in a userinfo section: in an ssh address `git@host` is the
+/// address itself, so it is left alone.
+fn invite_repo_url(repo_url: &str) -> String {
+    let trimmed = repo_url.trim();
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        strip_userinfo(trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Percent-encoding for the query of an invitation. Everything that is not an
+/// unreserved character is escaped, so a space stays a `%20` and there is no
+/// room for the ambiguity of form encoding.
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &byte in input.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
+}
+
+/// The other half of `percent_encode`. A malformed escape is reported rather
+/// than guessed, and so is a sequence that is not valid UTF-8.
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .ok_or_else(|| "The invitation link ends in the middle of an escape.".to_string())?;
+            let value = std::str::from_utf8(hex)
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "The invitation link has an invalid escape: %{}.",
+                        String::from_utf8_lossy(hex)
+                    )
+                })?;
+            out.push(value);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "The invitation link is not valid UTF-8.".to_string())
+}
+
+/// The invitation for a board: the string the user copies and passes on.
+fn build_invite_link(repo_url: &str, board: &str, from: &str) -> String {
+    format!(
+        "{}?repo={}&board={}&from={}",
+        INVITE_PREFIX,
+        percent_encode(&invite_repo_url(repo_url)),
+        percent_encode(board),
+        percent_encode(from),
+    )
+}
+
+/// Reads a link that may have arrived through any messenger, with whatever
+/// whitespace that implies. Only the repository is required; the labels are
+/// there to show the user what they are about to open.
+fn parse_invite_link(text: &str) -> Result<InviteDetails, String> {
+    let missing_repo = || "The invitation is incomplete: it does not say which board it is for.";
+    let query = text
+        .trim()
+        .strip_prefix(INVITE_PREFIX)
+        .ok_or_else(|| {
+            "That is not a GitTeam invitation. A link looks like gitteam://join?repo=…".to_string()
+        })?
+        .strip_prefix('?')
+        .ok_or_else(missing_repo)?;
+
+    let mut repo_url = None;
+    let mut board = None;
+    let mut from = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = percent_decode(value)?.trim().to_string();
+        match key {
+            "repo" => repo_url = Some(value),
+            "board" => board = Some(value),
+            "from" => from = Some(value),
+            // Unknown parameters are ignored: a newer app may send more.
+            _ => {}
+        }
+    }
+
+    let repo_url = repo_url
+        .filter(|url| !url.is_empty())
+        .ok_or_else(missing_repo)?;
+
+    Ok(InviteDetails {
+        // Sanitised on the way in as well: a hand-edited link must not smuggle a
+        // credential into the clone that follows.
+        repo_url: invite_repo_url(&repo_url),
+        board: board.filter(|label| !label.is_empty()),
+        from: from.filter(|label| !label.is_empty()),
+    })
+}
+
+/// The invitation for the active board. It carries no credential: access is
+/// granted on GitHub, so a link that leaks grants nothing.
+#[tauri::command]
+fn board_invite_link() -> Result<String, String> {
+    let config = read_git_config()?
+        .ok_or_else(|| "There is no active board to invite anyone to.".to_string())?;
+    Ok(build_invite_link(
+        &config.repo_url,
+        &extract_repo_name(&config.repo_url),
+        &config.git_user_name,
+    ))
+}
+
+/// Reads a pasted invitation so the user can see what it points to before
+/// anything is cloned.
+#[tauri::command]
+fn board_parse_invite(text: String) -> Result<InviteDetails, String> {
+    parse_invite_link(&text)
+}
+
 #[tauri::command]
 fn remove_project(project_id: String) -> Result<(), String> {
     let was_active = read_active_id()?.as_deref() == Some(project_id.as_str());
@@ -3181,6 +3324,8 @@ pub fn run() {
             get_active_project,
             add_project,
             board_create,
+            board_invite_link,
+            board_parse_invite,
             remove_project,
             switch_project,
             // Graph (Fase 6F)
@@ -4720,5 +4865,101 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     fn the_candidate_list_always_offers_the_base_name() {
         assert_eq!(board_name_candidates("b", 0), vec!["b"]);
         assert_eq!(board_name_candidates("b", 2).len(), 2);
+    }
+
+    #[test]
+    fn an_invitation_link_round_trips_through_its_own_parser() {
+        let link = build_invite_link(
+            "https://github.com/astivens/royero-labs-board.git",
+            "royero-labs-board",
+            "Ana Dev",
+        );
+        assert_eq!(
+            link,
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fastivens%2Froyero-labs-board.git&board=royero-labs-board&from=Ana%20Dev"
+        );
+
+        let parsed = parse_invite_link(&link).expect("the link we build must parse");
+        assert_eq!(
+            parsed.repo_url,
+            "https://github.com/astivens/royero-labs-board.git"
+        );
+        assert_eq!(parsed.board.as_deref(), Some("royero-labs-board"));
+        assert_eq!(parsed.from.as_deref(), Some("Ana Dev"));
+    }
+
+    #[test]
+    fn a_pasted_link_tolerates_whitespace_and_missing_labels() {
+        // The same string is copied as text, so it arrives with whatever the
+        // messenger added around it, and an older link may carry no labels.
+        let parsed = parse_invite_link(
+            "  gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git  ",
+        )
+        .expect("a link carrying only a repository must parse");
+        assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
+        assert_eq!(parsed.board, None);
+        assert_eq!(parsed.from, None);
+    }
+
+    #[test]
+    fn a_link_that_is_not_an_invitation_is_rejected_with_a_reason() {
+        for text in [
+            "",
+            "https://github.com/a/b.git",
+            "gitteam://other?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git",
+            "gitteam://join",
+            "gitteam://join?board=only-a-label",
+        ] {
+            let error = parse_invite_link(text).expect_err("must be rejected");
+            assert!(!error.trim().is_empty(), "{:?} produced no reason", text);
+        }
+    }
+
+    #[test]
+    fn an_invitation_never_carries_a_credential_in_either_direction() {
+        // Writing: a stored remote that somehow kept its token must not leak it
+        // into a string the user is about to pass around.
+        let link = build_invite_link("https://ghp_secret@github.com/a/b.git", "b", "Ana");
+        assert!(!link.contains("ghp_secret"), "{}", link);
+        assert!(link.contains("github.com%2Fa%2Fb.git"), "{}", link);
+
+        // Reading: a hand-edited link must not hand a credential to the clone.
+        let parsed = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fghp_secret%40github.com%2Fa%2Fb.git",
+        )
+        .expect("the link is well formed");
+        assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
+    }
+
+    #[test]
+    fn an_ssh_remote_survives_the_link_untouched() {
+        // In an ssh address, `git@host` is the address, not a credential.
+        let link = build_invite_link("git@github.com:a/b.git", "b", "Ana");
+        let parsed = parse_invite_link(&link).expect("an ssh board is a board too");
+        assert_eq!(parsed.repo_url, "git@github.com:a/b.git");
+    }
+
+    #[test]
+    fn percent_encoding_survives_every_character_a_label_can_meet() {
+        // The format is a query, not form encoding: `+` is a plus, and a label
+        // with spaces, an accent, an ampersand and a percent must come back
+        // exactly as it went in.
+        let board = "Tablero ñ & + 100%";
+        let link = build_invite_link("https://github.com/a/b.git", board, "José");
+        let parsed = parse_invite_link(&link).expect("the built link must parse");
+        assert_eq!(parsed.board.as_deref(), Some(board));
+        assert_eq!(parsed.from.as_deref(), Some("José"));
+        assert!(
+            !link.contains("Tablero ñ"),
+            "a raw space would cut the link short: {}",
+            link
+        );
+    }
+
+    #[test]
+    fn a_broken_escape_is_reported_rather_than_guessed() {
+        assert!(parse_invite_link("gitteam://join?repo=%zz").is_err());
+        assert!(parse_invite_link("gitteam://join?repo=%e2%28%a1").is_err());
+        assert!(parse_invite_link("gitteam://join?repo=%e2").is_err());
     }
 }

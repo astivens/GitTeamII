@@ -7,6 +7,7 @@ import type {
   CommitResult,
   GitConfig,
   GitStatus,
+  InviteDetails,
   Project,
   PullResult,
   PushResult,
@@ -37,6 +38,23 @@ export async function addProject(input: AddProjectInput): Promise<Project> {
  */
 export async function boardCreate(input: BoardCreateInput): Promise<Project> {
   return invoke<Project>("board_create", { input });
+}
+
+/**
+ * The invitation for the active board: the string the user passes to whoever
+ * they want on it. It carries no credential, because access to a private board
+ * is granted on GitHub rather than delegated by the link.
+ */
+export async function boardInviteLink(): Promise<string> {
+  return invoke<string>("board_invite_link");
+}
+
+/**
+ * Reads a pasted invitation so the user can see which board it is for, and who
+ * it came from, before anything is cloned.
+ */
+export async function boardParseInvite(text: string): Promise<InviteDetails> {
+  return invoke<InviteDetails>("board_parse_invite", { text });
 }
 
 export async function removeProject(projectId: string): Promise<void> {
