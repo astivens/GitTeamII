@@ -407,9 +407,23 @@ fn read_git_config() -> Result<Option<GitConfig>, String> {
     Ok(Some(config))
 }
 
+/// The config as it goes to disk: with the credential taken out of the url.
+///
+/// A url pasted into the connect form can carry a token — GitHub itself prints
+/// `https://x-access-token:<token>@github.com/owner/repo.git` for a token clone —
+/// and that token would then sit in plaintext in `config.json` for as long as
+/// the project exists. The credential belongs to the keyring and nowhere else,
+/// and it is not lost by dropping it here: `load_pat` still has it.
+fn config_to_persist(config: &GitConfig) -> GitConfig {
+    GitConfig {
+        repo_url: strip_userinfo(&config.repo_url),
+        ..config.clone()
+    }
+}
+
 fn write_git_config(config: &GitConfig) -> Result<(), String> {
     let path = config_path()?;
-    let content = serde_json::to_string_pretty(config)
+    let content = serde_json::to_string_pretty(&config_to_persist(config))
         .map_err(|e| format!("serialize config failed: {}", e))?;
     fs::write(&path, content).map_err(|e| format!("write config failed: {}", e))?;
     Ok(())
@@ -529,6 +543,50 @@ fn strip_userinfo(url: &str) -> String {
     url.to_string()
 }
 
+/// Takes the credential out of any url a message may be carrying.
+///
+/// The url this app hands git carries the token: as the password
+/// (`https://x-access-token:<token>@host/…`) for GitHub, as the user
+/// (`https://<token>@host/…`) for any other host. Git's own messages anonymise
+/// the userinfo before printing a remote — measured, both forms come back as
+/// `https://host/path` — so the reproduction lives on this side of the boundary:
+/// `run_git_with_credential` prepends the `url.<credentialed>.insteadOf=`
+/// override to `run_git`'s arguments and `run_git` reports those arguments.
+/// Everything that can reach the user or a log goes through here, which closes
+/// that and keeps a git or curl that prints the url as given from handing the
+/// token back.
+///
+/// Only http(s) is touched, the rule the stored remote follows as well: in an
+/// `ssh://git@host` url the `git@` is addressing, not a secret.
+fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(sep) = rest.find("://") {
+        let (head, after) = rest.split_at(sep + 3);
+        out.push_str(head);
+        // The scheme is what ends at `://` — "https" in `https://…`, and also in
+        // the override's key, where it reads `url.https://…`.
+        let scheme = head[..head.len() - 3].to_ascii_lowercase();
+        let is_web = scheme.ends_with("http") || scheme.ends_with("https");
+        // The authority ends at the first delimiter, so `scheme://user@host/path`
+        // is redacted even though the `@` sits before the slash.
+        let end = after
+            .find(|c: char| matches!(c, '/' | '?' | '#' | ' ' | '\t' | '\n' | '\r' | '"' | '\''))
+            .unwrap_or(after.len());
+        let (authority, tail) = after.split_at(end);
+        match (is_web, authority.rfind('@')) {
+            (true, Some(at)) => {
+                out.push_str("***");
+                out.push_str(&authority[at..]);
+            }
+            _ => out.push_str(authority),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
 fn extract_repo_name(url: &str) -> String {
     let stripped = url.trim_end_matches('/').trim_end_matches(".git");
     let without_scheme = stripped
@@ -585,19 +643,24 @@ async fn run_git(
     for a in args {
         cmd.arg(a);
     }
+    // `run_git_with_credential` prepends the credential override to this same
+    // slice, so the arguments can carry the token. They are redacted once, here,
+    // and both messages below use that rendering: a failed `fetch` during setup
+    // must not print the token it was given.
+    let invoked = redact_credentials(&args.join(" "));
     let fut = cmd.output();
     let output = timeout(Duration::from_secs(timeout_secs), fut)
         .await
-        .map_err(|_| format!("git {} timed out after {}s", args.join(" "), timeout_secs))?
+        .map_err(|_| format!("git {} timed out after {}s", invoked, timeout_secs))?
         .map_err(|e| format!("git spawn failed: {}", e))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
         return Err(format!(
             "git {} failed (exit {}): {}",
-            args.join(" "),
+            invoked,
             output.status,
-            stderr.trim()
+            redact_credentials(stderr.trim())
         ));
     }
     Ok(stdout)
@@ -1426,7 +1489,12 @@ async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectio
             error: Some(format!("Failed to run git: {}", e)),
         }),
         Ok(Ok(output)) if !output.status.success() => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            // Git anonymises the userinfo in its own messages, and the url handed
+            // to `ls-remote` here is the credentialed one: what this command says
+            // goes to the connect form, so it is redacted as well.
+            let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr))
+                .trim()
+                .to_string();
             let user_msg = if stderr.is_empty() {
                 format!("git ls-remote failed with exit {}", output.status)
             } else {
@@ -1543,7 +1611,9 @@ async fn setup_repo_inner(
             Ok(Ok(output)) => output,
         };
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr))
+                .trim()
+                .to_string();
             let _ = fs::remove_dir_all(&dir);
             return Err(format!("git clone failed: {}", stderr));
         }
@@ -2653,7 +2723,7 @@ async fn git_start_watcher(
                         .map(|s| s.to_string())
                 }
                 Ok(Ok(output)) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr));
                     eprintln!(
                         "[gitteam watcher] ls-remote failed (exit {}): {}",
                         output.status,
@@ -5034,6 +5104,141 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         }
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    // S6 — a message never hands the token back. The shapes are the ones git,
+    // curl and the credential override actually produce.
+    fn redact_credentials_takes_the_credential_out_of_the_shapes_it_travels_in() {
+        let cases = [
+            (
+                "the password form github uses",
+                "fatal: unable to access 'https://x-access-token:ghp_secret@github.com/a/b.git/': The requested URL returned error: 403",
+                "fatal: unable to access 'https://***@github.com/a/b.git/': The requested URL returned error: 403",
+            ),
+            (
+                "the token-as-user form any other host gets",
+                "fatal: could not read from 'https://ghp_secret@gitea.example.com/a/b.git/'",
+                "fatal: could not read from 'https://***@gitea.example.com/a/b.git/'",
+            ),
+            (
+                "the override key run_git_with_credential prepends",
+                "-c url.https://x-access-token:ghp_secret@github.com/.insteadOf=https://github.com/ clone --no-progress",
+                "-c url.https://***@github.com/.insteadOf=https://github.com/ clone --no-progress",
+            ),
+            (
+                "a url that carries nothing, path included",
+                "git fetch failed (exit 128): fatal: could not read Username for 'https://github.com/a/b.git'",
+                "git fetch failed (exit 128): fatal: could not read Username for 'https://github.com/a/b.git'",
+            ),
+            (
+                "an ssh url, where git@ is addressing and not a secret",
+                "fatal: could not read from 'ssh://git@github.com/a/b.git'",
+                "fatal: could not read from 'ssh://git@github.com/a/b.git'",
+            ),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(redact_credentials(input), expected, "{}", name);
+        }
+    }
+
+    #[tokio::test]
+    // S6 — the whole path, not just the string: the credential belongs to the
+    // arguments `run_git_with_credential` builds, so a failure there reached the
+    // user with the token in it.
+    async fn a_failed_command_does_not_report_the_credential_it_was_given() {
+        let dir = unique_temp_dir("credential-in-error");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // `rev-parse` fails in a directory that is not a repository, with no
+        // network and no project involved: the credential is in argv and the
+        // command still fails deterministically.
+        let err = run_git_with_credential(
+            &dir,
+            "https://github.com/astivens/board.git",
+            "ghp_secret",
+            &["rev-parse", "HEAD"],
+            10,
+            None,
+        )
+        .await
+        .expect_err("a directory that is not a repository must fail");
+        assert!(
+            !err.contains("ghp_secret"),
+            "the token came back to the caller: {}",
+            err
+        );
+        assert!(
+            err.contains("***@github.com"),
+            "the arguments are still reported, redacted: {}",
+            err
+        );
+        assert!(
+            err.contains("fatal:"),
+            "and so is what git said: {}",
+            err
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    // S6 — the property on the connect form's own path: git anonymises the
+    // userinfo of the url it prints, and this keeps it that way whichever way the
+    // probe fails. It passes without the redactor too — that is the finding, and
+    // it is recorded in the log: the reproducible leak was our own arguments,
+    // which the test above pins. Port 1 on loopback refuses at once, so this needs
+    // neither DNS nor an outside network.
+    async fn the_connection_test_does_not_report_the_credential_it_was_given() {
+        let result = git_test_connection_inner("https://127.0.0.1:1/board.git", "ghp_secret")
+            .await
+            .expect("this probe reports failures in its result, it does not return Err");
+        let error = result.error.expect("port 1 refuses the connection");
+        assert!(!result.ok, "the probe must be reported as failed");
+        assert!(
+            !error.contains("ghp_secret"),
+            "the token came back to the connect form: {}",
+            error
+        );
+    }
+
+    #[test]
+    // S6 — the credential lives in the keyring, so it does not go into the file
+    // either: a url pasted with its token in it is stored without one.
+    fn a_credential_in_the_configured_url_is_not_written_to_the_config() {
+        let config = GitConfig {
+            repo_url: "https://x-access-token:ghp_secret@github.com/astivens/board.git".to_string(),
+            git_user_name: "Ada".to_string(),
+            git_user_email: "ada@example.com".to_string(),
+            last_sync_at: Some("2026-10-19T00:00:00Z".to_string()),
+        };
+
+        let stored = config_to_persist(&config);
+        assert_eq!(
+            stored.repo_url, "https://github.com/astivens/board.git",
+            "the url is stored clean"
+        );
+        assert_eq!(stored.git_user_name, "Ada");
+        assert_eq!(stored.git_user_email, "ada@example.com");
+        assert_eq!(stored.last_sync_at.as_deref(), Some("2026-10-19T00:00:00Z"));
+
+        let json = serde_json::to_string_pretty(&stored).unwrap();
+        assert!(
+            !json.contains("ghp_secret"),
+            "the file would carry the token: {}",
+            json
+        );
+
+        let clean = GitConfig {
+            repo_url: "https://github.com/astivens/board.git".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(
+            config_to_persist(&clean).repo_url,
+            "https://github.com/astivens/board.git",
+            "a url that never carried a credential is written as it came"
+        );
     }
 
     #[test]
