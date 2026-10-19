@@ -42,7 +42,7 @@ export function CommandPalette({
   const tickets = useTicketsStore((s) => s.tickets);
   const gitConfig = useTicketsStore((s) => s.gitConfig);
   const syncNow = useTicketsStore((s) => s.syncNow);
-  const disconnectRepo = useTicketsStore((s) => s.disconnectRepo);
+  const removeActiveProject = useTicketsStore((s) => s.removeActiveProject);
   const setStatusFilter = useTicketsStore((s) => s.setStatusFilter);
 
   // cmdk owns the query; lift it so we can filter tickets explicitly.
@@ -215,7 +215,7 @@ export function CommandPalette({
                   onSelect={() => {
                     closePalette();
                     pushToast("Disconnecting…", "default");
-                    void disconnectRepo();
+                    void removeActiveProject();
                   }}
                   className="palette-item"
                 >

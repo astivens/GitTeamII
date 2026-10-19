@@ -2,7 +2,12 @@ import { create } from "zustand";
 import * as api from "../lib/tauri";
 import { pushToast } from "../lib/toast";
 import type { CreateTicketInput, Ticket, TicketStatus } from "../types/ticket";
-import type { GitConfig, SyncStatus } from "../types/git";
+import type {
+  AddProjectInput,
+  GitConfig,
+  Project,
+  SyncStatus,
+} from "../types/git";
 
 // ----- debounce (module-level so it survives across store actions) -----
 
@@ -24,6 +29,21 @@ function drainPending(): string[] {
   return files;
 }
 
+/**
+ * Derive a backwards-compatible `GitConfig` view from an active `Project`.
+ * The `Project` type doesn't carry the git user identity, so the user fields
+ * stay empty until the backend exposes them. New code should read from
+ * `activeProject` directly.
+ */
+function projectToGitConfig(project: Project): GitConfig {
+  return {
+    repo_url: project.repo_url,
+    git_user_name: "",
+    git_user_email: "",
+    last_sync_at: project.last_sync_at,
+  };
+}
+
 interface TicketsState {
   tickets: Ticket[];
   loading: boolean;
@@ -32,13 +52,28 @@ interface TicketsState {
   /** Last ticket ID opened in the side panel/modal — used by the Y shortcut to know what to yank. */
   lastViewedId: string | null;
   initialized: boolean;
+
+  // Project state (multi-project)
+  projects: Project[];
+  activeProject: Project | null;
+
+  /**
+   * @deprecated Derived from `activeProject`. Kept temporarily for components
+   * that still read it directly. Will be removed once all call sites migrate
+   * to `activeProject.id`.
+   */
   dataDir: string | null;
+  /**
+   * @deprecated Derived from `activeProject`. Kept temporarily for components
+   * that still read `git_user_name` / `repo_url` directly. Will be removed
+   * once all call sites migrate to `activeProject`.
+   */
+  gitConfig: GitConfig | null;
 
   // Sync state
   syncStatus: SyncStatus;
   syncError: string | null;
   lastSyncedAt: string | null;
-  gitConfig: GitConfig | null;
   remoteSha: string | null;
   pendingCommits: Set<string>;
   conflicts: string[];
@@ -59,15 +94,15 @@ interface TicketsState {
   select: (id: string | null) => void;
   getRawMarkdown: (filename: string) => Promise<string>;
 
+  // Project actions (replace loadConfig / setupRepo / disconnectRepo)
+  loadProjects: () => Promise<void>;
+  loadActiveProject: () => Promise<void>;
+  addProject: (input: AddProjectInput) => Promise<Project>;
+  removeProject: (id: string) => Promise<void>;
+  removeActiveProject: () => Promise<void>;
+  switchProject: (id: string) => Promise<Project>;
+
   // Sync actions
-  loadConfig: () => Promise<void>;
-  setupRepo: (input: {
-    url: string;
-    pat: string;
-    userName: string;
-    userEmail: string;
-  }) => Promise<void>;
-  disconnectRepo: () => Promise<void>;
   syncNow: () => Promise<void>;
   flushNow: () => Promise<void>;
   startWatcher: () => Promise<void>;
@@ -163,12 +198,17 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     selectedId: null,
     lastViewedId: null,
     initialized: false,
+
+    projects: [],
+    activeProject: null,
+
+    // Deprecated — derived from activeProject in loadActiveProject / addProject.
     dataDir: null,
+    gitConfig: null,
 
     syncStatus: "unconfigured",
     syncError: null,
     lastSyncedAt: null,
-    gitConfig: null,
     remoteSha: null,
     pendingCommits: new Set<string>(),
     conflicts: [],
@@ -183,15 +223,10 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     initialize: async () => {
       set({ loading: true, error: null });
       try {
-        const dataDir = await api.initDataDir();
-        const tickets = await api.listTickets();
-        set({
-          dataDir,
-          tickets,
-          initialized: true,
-          loading: false,
-          error: null,
-        });
+        // Backwards-compat shim: the old flow did `initDataDir` + `listTickets`
+        // up front. With multi-project the data dir is project-scoped, so we
+        // delegate to `loadProjects` which knows about the active project.
+        await get().loadProjects();
       } catch (e) {
         set({
           loading: false,
@@ -249,20 +284,62 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       return api.readTicketRaw(filename);
     },
 
-    loadConfig: async () => {
+    loadProjects: async () => {
+      set({ loading: true, error: null });
       try {
-        const config = await api.gitGetConfig();
-        if (!config) {
+        const [projects, active] = await Promise.all([
+          api.listProjects(),
+          api.getActiveProject(),
+        ]);
+        set({ projects });
+
+        if (!active) {
+          // No project yet — user lands on the SetupScreen.
           set({
-            syncStatus: "unconfigured",
+            activeProject: null,
             gitConfig: null,
-            lastSyncedAt: null,
+            dataDir: null,
+            syncStatus: "unconfigured",
             syncError: null,
+            lastSyncedAt: null,
             remoteSha: null,
+            tickets: [],
+            initialized: true,
+            loading: false,
           });
           return;
         }
-        set({ gitConfig: config, lastSyncedAt: config.last_sync_at });
+
+        // Delegate the heavy init (health check, PAT recovery, ticket load,
+        // watcher start) to loadActiveProject, which assumes an active
+        // project is present.
+        set({ activeProject: active });
+        await get().loadActiveProject();
+      } catch (e) {
+        set({
+          loading: false,
+          error: e instanceof Error ? e.message : String(e),
+          syncStatus: "error",
+          syncError: e instanceof Error ? e.message : String(e),
+        });
+      }
+    },
+
+    loadActiveProject: async () => {
+      const { activeProject } = get();
+      if (!activeProject) {
+        // Nothing to load — caller is misusing the action.
+        return;
+      }
+      try {
+        // Populate the deprecated fields from the active project so any
+        // component still reading them keeps working during the transition.
+        const derivedGitConfig = projectToGitConfig(activeProject);
+        set({
+          gitConfig: derivedGitConfig,
+          dataDir: activeProject.id,
+          lastSyncedAt: activeProject.last_sync_at,
+        });
 
         // Try to recover the PAT so we can re-setup if the data dir is broken
         let pat: string | null = null;
@@ -291,7 +368,11 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
             return;
           }
           try {
-            const setupResult = await api.gitSetupRepo(config, pat);
+            // Reuse the legacy `git_setup_repo` path with the derived config +
+            // recovered PAT. The Rust side re-runs clone/init for the active
+            // project without affecting the project list.
+            const legacyConfig: GitConfig = derivedGitConfig;
+            const setupResult = await api.gitSetupRepo(legacyConfig, pat);
             set({
               gitConfig: setupResult.config,
               lastSyncedAt: new Date().toISOString(),
@@ -307,12 +388,10 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
 
         set({ syncStatus: "synced", syncError: null });
 
-        // Load tickets from the data dir
-        const dir = await api.initDataDir();
+        // Load tickets for the active project
         const tickets = await api.listTickets();
         const isFirstRun = tickets.length === 0;
         set({
-          dataDir: dir,
           tickets,
           initialized: true,
           loading: false,
@@ -342,26 +421,26 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       }
     },
 
-    setupRepo: async (input) => {
+    addProject: async (input: AddProjectInput): Promise<Project> => {
       set({ syncStatus: "syncing", syncError: null });
       try {
-        const config: GitConfig = {
-          repo_url: input.url,
-          git_user_name: input.userName,
-          git_user_email: input.userEmail,
-          last_sync_at: null,
-        };
-        const result = await api.gitSetupRepo(config, input.pat);
+        const project = await api.addProject(input);
+        // The backend makes the new project active — refresh the list so the
+        // picker (future UI) reflects it.
+        const projects = await api.listProjects();
         set({
-          syncStatus: "synced",
-          gitConfig: result.config,
+          projects,
+          activeProject: project,
+          gitConfig: projectToGitConfig(project),
+          dataDir: project.id,
           lastSyncedAt: new Date().toISOString(),
+          syncStatus: "synced",
           syncError: null,
         });
-        const dir = await api.initDataDir();
+
+        // Initialize the just-activated project: load tickets, start watcher.
         const tickets = await api.listTickets();
         set({
-          dataDir: dir,
           tickets,
           initialized: true,
           loading: false,
@@ -380,6 +459,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         if (tickets.length === 0) {
           set({ justSetup: true });
         }
+        return project;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         set({ syncStatus: "error", syncError: msg });
@@ -387,29 +467,91 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       }
     },
 
-    disconnectRepo: async () => {
-      // Stop the watcher first so it doesn't race with the config deletion
+    removeProject: async (id: string) => {
+      const { activeProject } = get();
+      const isActive = activeProject?.id === id;
+      if (isActive) {
+        // Stop watcher + cancel any in-flight debounced commits before we
+        // tear down the underlying data dir.
+        try {
+          await get().stopWatcher();
+        } catch {
+          // ignore — best effort
+        }
+        clearDebounce();
+      }
+      try {
+        await api.removeProject(id);
+      } catch (e) {
+        pushToast(
+          `Could not remove project: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+        throw e;
+      }
+      // Refresh the list; if we removed the active one, the backend will
+      // report `null` on the next `getActiveProject` call and we land back
+      // on the unconfigured state.
+      const projects = await api.listProjects();
+      if (isActive) {
+        const stillActive = await api.getActiveProject();
+        if (!stillActive) {
+          set({
+            projects,
+            activeProject: null,
+            gitConfig: null,
+            dataDir: null,
+            syncStatus: "unconfigured",
+            syncError: null,
+            lastSyncedAt: null,
+            remoteSha: null,
+            tickets: [],
+            pendingCommits: new Set<string>(),
+            conflicts: [],
+            justSetup: false,
+          });
+          return;
+        }
+        set({ projects, activeProject: stillActive });
+        await get().loadActiveProject();
+      } else {
+        set({ projects });
+      }
+    },
+
+    removeActiveProject: async () => {
+      const { activeProject } = get();
+      if (!activeProject) {
+        // Nothing to do — user is already in the unconfigured state.
+        return;
+      }
+      await get().removeProject(activeProject.id);
+    },
+
+    switchProject: async (id: string): Promise<Project> => {
+      // Stop the watcher first so it doesn't race with the project switch.
       try {
         await get().stopWatcher();
       } catch {
         // ignore — best effort
       }
-      // Cancel any pending debounced commits
+      // Cancel any pending debounced commits — they're tied to the old repo.
       clearDebounce();
-      try {
-        await api.gitDeleteConfig();
-      } catch {
-        // ignore — best effort
-      }
+      set({ syncStatus: "syncing", syncError: null });
+      const project = await api.switchProject(id);
+      const projects = await api.listProjects();
       set({
-        syncStatus: "unconfigured",
-        gitConfig: null,
-        lastSyncedAt: null,
-        syncError: null,
+        projects,
+        activeProject: project,
+        gitConfig: projectToGitConfig(project),
+        dataDir: project.id,
+        lastSyncedAt: project.last_sync_at,
         remoteSha: null,
         pendingCommits: new Set<string>(),
         conflicts: [],
       });
+      await get().loadActiveProject();
+      return project;
     },
 
     syncNow: async () => {

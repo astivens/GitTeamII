@@ -94,9 +94,174 @@ pub struct GitStatus {
     pub is_clean: bool,
 }
 
+// ----- project (multi-project support) -----
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub repo_url: String,
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AddProjectInput {
+    pub url: String,
+    pub pat: String,
+    pub user_name: String,
+    pub user_email: String,
+}
+
+fn projects_root() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
+    Ok(home.join(".gitteam").join("projects"))
+}
+
+/// Container directory for one project: holds the metadata file and the
+/// ticket-repo checkout as siblings.
+fn project_dir(project_id: &str) -> Result<PathBuf, String> {
+    Ok(projects_root()?.join(project_id))
+}
+
+/// The git checkout that holds the ticket markdown files.
+///
+/// This is deliberately a *subdirectory* of `project_dir`: `config.json` lives
+/// next to it, not inside it. Keeping the metadata out of the checkout means
+/// the ticket repo never has a permanently untracked `config.json` and
+/// `git_status` reports a clean tree.
+fn project_repo_dir(project_id: &str) -> Result<PathBuf, String> {
+    Ok(project_dir(project_id)?.join("repo"))
+}
+
+fn project_config_path(project_id: &str) -> Result<PathBuf, String> {
+    Ok(project_dir(project_id)?.join("config.json"))
+}
+
+fn active_marker_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
+    Ok(home.join(".gitteam").join(".active"))
+}
+
+fn derive_project_id(url: &str) -> String {
+    let name = extract_repo_name(url);
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn read_active_id() -> Result<Option<String>, String> {
+    let path = active_marker_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("read active failed: {}", e))?;
+    let id = content.trim().to_string();
+    if id.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(id))
+    }
+}
+
+fn write_active_id(project_id: &str) -> Result<(), String> {
+    let path = active_marker_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir active dir failed: {}", e))?;
+    }
+    fs::write(&path, project_id).map_err(|e| format!("write active failed: {}", e))?;
+    Ok(())
+}
+
+fn clear_active_id() -> Result<(), String> {
+    let path = active_marker_path()?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("clear active failed: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Keyring service name for a project's PAT. Legacy (no project) keeps the
+/// original `gitteam` service; each project gets `gitteam/<id>` so credentials
+/// never leak between repositories.
+fn pat_service(project_id: Option<&str>) -> String {
+    match project_id {
+        Some(id) => format!("gitteam/{}", id),
+        None => "gitteam".to_string(),
+    }
+}
+
+fn delete_pat_for_project(project_id: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(&pat_service(Some(project_id)), "github-pat")
+        .map_err(keyring_err)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(keyring_err(e)),
+    }
+}
+
+fn load_project(project_id: &str) -> Result<Option<Project>, String> {
+    let path = project_config_path(project_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("read project failed: {}", e))?;
+    let gc: GitConfig =
+        serde_json::from_str(&content).map_err(|e| format!("parse project failed: {}", e))?;
+    Ok(Some(Project {
+        id: project_id.to_string(),
+        name: extract_repo_name(&gc.repo_url),
+        repo_url: gc.repo_url,
+        last_sync_at: gc.last_sync_at,
+    }))
+}
+
 // ----- data dir -----
 
+fn current_project_id_opt() -> Option<String> {
+    read_active_id().ok().flatten()
+}
+
+/// The active project's id and container directory, or `None` when no marker
+/// is set or the marker is stale (points at a project that no longer exists).
+///
+/// Keyed off the project *directory*, not `config.json`: during `add_project`
+/// the repo is cloned before the config is written, so requiring the config
+/// here would silently route that first write to the legacy paths.
+fn active_project() -> Result<Option<(String, PathBuf)>, String> {
+    let Some(id) = current_project_id_opt() else {
+        return Ok(None);
+    };
+    let dir = project_dir(&id)?;
+    if dir.is_dir() {
+        Ok(Some((id, dir)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Resolve the data dir for the active project, falling back to the legacy
+/// `~/.gitteam-data/` when no multi-project is set up. All existing ticket and
+/// git commands use this so they automatically pick up the active project.
 fn data_dir() -> Result<PathBuf, String> {
+    if let Some((id, _)) = active_project()? {
+        return project_repo_dir(&id);
+    }
     let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
     Ok(home.join(".gitteam-data"))
 }
@@ -117,6 +282,9 @@ fn ensure_data_dir() -> Result<PathBuf, String> {
 }
 
 fn config_path() -> Result<PathBuf, String> {
+    if let Some((id, _)) = active_project()? {
+        return project_config_path(&id);
+    }
     let home = dirs::home_dir().ok_or_else(|| "could not resolve $HOME".to_string())?;
     Ok(home.join(".gitteam-config.json"))
 }
@@ -135,18 +303,26 @@ fn keyring_err(e: keyring::Error) -> String {
     }
 }
 
+/// Service name for the currently active project, or the legacy service when
+/// no project is active. `load_pat` backs `git_load_pat`, `git_pull`,
+/// `git_push` and the background watcher, so making it project-aware is what
+/// keeps every one of them working after a project is added.
+fn active_pat_service() -> String {
+    pat_service(current_project_id_opt().as_deref())
+}
+
 fn save_pat(pat: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new("gitteam", "github-pat").map_err(keyring_err)?;
+    let entry = keyring::Entry::new(&active_pat_service(), "github-pat").map_err(keyring_err)?;
     entry.set_password(pat).map_err(keyring_err)
 }
 
 fn load_pat() -> Result<String, String> {
-    let entry = keyring::Entry::new("gitteam", "github-pat").map_err(keyring_err)?;
+    let entry = keyring::Entry::new(&active_pat_service(), "github-pat").map_err(keyring_err)?;
     entry.get_password().map_err(keyring_err)
 }
 
 fn delete_pat() -> Result<(), String> {
-    let entry = keyring::Entry::new("gitteam", "github-pat").map_err(keyring_err)?;
+    let entry = keyring::Entry::new(&active_pat_service(), "github-pat").map_err(keyring_err)?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
@@ -697,10 +873,9 @@ async fn git_load_pat() -> Result<String, String> {
     load_pat()
 }
 
-#[tauri::command]
-async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionResult, String> {
-    let auth_url = with_authenticated_url(&url, &pat);
-    let repo_name = extract_repo_name(&url);
+async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectionResult, String> {
+    let auth_url = with_authenticated_url(url, pat);
+    let repo_name = extract_repo_name(url);
     let mut cmd = Command::new("git");
     cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
     let result = timeout(Duration::from_secs(15), cmd.output()).await;
@@ -750,10 +925,44 @@ async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionR
 }
 
 #[tauri::command]
+async fn git_test_connection(url: String, pat: String) -> Result<TestConnectionResult, String> {
+    git_test_connection_inner(&url, &pat).await
+}
+
+#[tauri::command]
 async fn git_setup_repo(config: GitConfig, pat: String) -> Result<SetupResult, String> {
     let dir = data_dir()?;
+    setup_repo_inner(dir, config, pat).await
+}
 
-    let test = git_test_connection(config.repo_url.clone(), pat.clone()).await?;
+/// Clone (or adopt) `config.repo_url` into `dir`, then persist the PAT and the
+/// config for the active project.
+///
+/// Shared by `git_setup_repo` (recovery for the active project) and
+/// `add_project` (a freshly created project directory). Callers must have
+/// already activated the project so `save_pat` / `write_git_config` resolve to
+/// its paths. `dir` is taken by value so the body below can keep using `&dir`.
+async fn setup_repo_inner(
+    dir: PathBuf,
+    mut config: GitConfig,
+    pat: String,
+) -> Result<SetupResult, String> {
+    // The active-project recovery path builds its GitConfig from `Project`,
+    // which carries no user identity — so it arrives with empty name/email.
+    // Backfill from the config already saved for this project instead of
+    // overwriting a good identity (and the saved config) with empty values.
+    if config.git_user_name.trim().is_empty() || config.git_user_email.trim().is_empty() {
+        if let Some(saved) = read_git_config()? {
+            if config.git_user_name.trim().is_empty() {
+                config.git_user_name = saved.git_user_name;
+            }
+            if config.git_user_email.trim().is_empty() {
+                config.git_user_email = saved.git_user_email;
+            }
+        }
+    }
+
+    let test = git_test_connection_inner(&config.repo_url, &pat).await?;
     if !test.ok {
         return Err(format!(
             "Connection test failed: {}",
@@ -764,7 +973,16 @@ async fn git_setup_repo(config: GitConfig, pat: String) -> Result<SetupResult, S
 
     let auth_url = with_authenticated_url(&config.repo_url, &pat);
 
-    if !dir.exists() {
+    let is_git_repo = dir.join(".git").exists();
+    let dir_is_empty = dir.exists()
+        && fs::read_dir(&dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+
+    // A missing directory *or* an empty one (e.g. a project dir just created by
+    // `add_project`) is a fresh clone target. An existing non-empty directory
+    // without `.git` is adopted via `git init` + fetch below.
+    if !dir.exists() || (dir_is_empty && !is_git_repo) {
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
         let mut cmd = Command::new("git");
         cmd.arg("clone").arg(&auth_url).arg(&dir);
@@ -1480,6 +1698,124 @@ async fn git_current_remote_sha(
     Ok(guard.clone())
 }
 
+// ----- project commands -----
+
+#[tauri::command]
+fn list_projects() -> Result<Vec<Project>, String> {
+    let root = projects_root()?;
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut projects = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|e| format!("read_dir projects failed: {}", e))? {
+        let entry = entry.map_err(|e| format!("dir entry failed: {}", e))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if let Some(p) = load_project(&id)? {
+            projects.push(p);
+        }
+    }
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(projects)
+}
+
+#[tauri::command]
+fn get_active_project() -> Result<Option<Project>, String> {
+    match read_active_id()? {
+        Some(id) => load_project(&id),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn add_project(input: AddProjectInput) -> Result<Project, String> {
+    // Resolve project_id, appending a suffix on collision. Collisions are
+    // checked against the project *directory* so a partially created project
+    // from an earlier failed attempt cannot be reused.
+    let base_id = derive_project_id(&input.url);
+    let mut id = base_id.clone();
+    let mut counter: u32 = 2;
+    while project_dir(&id)?.exists() {
+        id = format!("{}-{}", base_id, counter);
+        counter += 1;
+    }
+
+    // Fail fast with a clear message before touching the filesystem.
+    let test = git_test_connection_inner(&input.url, &input.pat).await?;
+    if !test.ok {
+        return Err(test
+            .error
+            .unwrap_or_else(|| "connection test failed".to_string()));
+    }
+
+    let gc = GitConfig {
+        repo_url: input.url.clone(),
+        git_user_name: input.user_name.clone(),
+        git_user_email: input.user_email.clone(),
+        last_sync_at: None,
+    };
+
+    // Create the container dir (metadata + repo live side by side) and activate
+    // the project *before* the clone so `save_pat` / `write_git_config` inside
+    // `setup_repo_inner` resolve to this project's paths.
+    let dir = project_dir(&id)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir project dir failed: {}", e))?;
+    write_active_id(&id)?;
+
+    // Clone the repo and persist the PAT + config.
+    let setup = match setup_repo_inner(project_repo_dir(&id)?, gc, input.pat).await {
+        Ok(result) => result,
+        Err(e) => {
+            // Roll back so a failed add leaves no half-created project and no
+            // dangling active marker.
+            let _ = delete_pat_for_project(&id);
+            let _ = fs::remove_dir_all(&dir);
+            let _ = clear_active_id();
+            return Err(e);
+        }
+    };
+
+    Ok(Project {
+        id,
+        name: extract_repo_name(&input.url),
+        repo_url: setup.config.repo_url,
+        last_sync_at: setup.config.last_sync_at,
+    })
+}
+
+#[tauri::command]
+fn remove_project(project_id: String) -> Result<(), String> {
+    let was_active = read_active_id()?.as_deref() == Some(project_id.as_str());
+
+    // Best-effort keyring delete
+    let _ = delete_pat_for_project(&project_id);
+
+    // Remove project dir
+    let dir = project_dir(&project_id)?;
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("rmdir project failed: {}", e))?;
+    }
+
+    if was_active {
+        clear_active_id()?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn switch_project(project_id: String) -> Result<Project, String> {
+    let project = load_project(&project_id)?
+        .ok_or_else(|| format!("project '{}' not found", project_id))?;
+    write_active_id(&project_id)?;
+    Ok(project)
+}
+
 // ----- runner -----
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1516,6 +1852,12 @@ pub fn run() {
             git_start_watcher,
             git_stop_watcher,
             git_current_remote_sha,
+            // Multi-project (Fase 6)
+            list_projects,
+            get_active_project,
+            add_project,
+            remove_project,
+            switch_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CreateTicketInput, Ticket } from "../types/ticket";
 import type {
+  AddProjectInput,
   CommitResult,
   GitConfig,
   GitStatus,
+  Project,
   PullResult,
   PushResult,
   SetupResult,
@@ -12,6 +14,26 @@ import type {
 
 export async function initDataDir(): Promise<string> {
   return invoke<string>("init_data_dir");
+}
+
+export async function listProjects(): Promise<Project[]> {
+  return invoke<Project[]>("list_projects");
+}
+
+export async function getActiveProject(): Promise<Project | null> {
+  return invoke<Project | null>("get_active_project");
+}
+
+export async function addProject(input: AddProjectInput): Promise<Project> {
+  return invoke<Project>("add_project", { input });
+}
+
+export async function removeProject(projectId: string): Promise<void> {
+  return invoke<void>("remove_project", { projectId });
+}
+
+export async function switchProject(projectId: string): Promise<Project> {
+  return invoke<Project>("switch_project", { projectId });
 }
 
 export async function listTickets(): Promise<Ticket[]> {

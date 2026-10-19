@@ -2,7 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { AppHeader } from "./components/layout/AppHeader";
-import { EmptyState, OnboardingState } from "./components/layout/EmptyState";
+import {
+  EmptyState,
+  NoProjectEmptyState,
+  OnboardingState,
+} from "./components/layout/EmptyState";
 import { KanbanBoard } from "./components/tickets/KanbanBoard";
 import { TicketModal } from "./components/tickets/TicketModal";
 import { Button } from "./components/ui/Button";
@@ -33,19 +37,46 @@ function App() {
   const error = useTicketsStore((s) => s.error);
   const tickets = useTicketsStore((s) => s.tickets);
   const remove = useTicketsStore((s) => s.remove);
-  const dataDir = useTicketsStore((s) => s.dataDir);
+  const projects = useTicketsStore((s) => s.projects);
+  const activeProject = useTicketsStore((s) => s.activeProject);
   const syncStatus = useTicketsStore((s) => s.syncStatus);
-  const loadConfig = useTicketsStore((s) => s.loadConfig);
+  const loadProjects = useTicketsStore((s) => s.loadProjects);
   const syncError = useTicketsStore((s) => s.syncError);
   const justSetup = useTicketsStore((s) => s.justSetup);
 
   const [modal, setModal] = useState<ModalState>({ kind: "closed" });
   const [conflictModalOpen, setConflictModalOpen] = useState(false);
   const [bootDone, setBootDone] = useState(false);
+  /**
+   * Forces the SetupScreen to render on demand, even when there are already
+   * linked projects. Set when the user clicks "Link repository" / "Link new
+   * repository" from the ProjectSwitcher empty-state pill or from the
+   * no-project main-area empty state. Cleared automatically once a project
+   * becomes active (SetupScreen completed successfully).
+   */
+  const [setupForced, setSetupForced] = useState(false);
 
   useEffect(() => {
-    void loadConfig().finally(() => setBootDone(true));
-  }, [loadConfig]);
+    void loadProjects().finally(() => setBootDone(true));
+  }, [loadProjects]);
+
+  // Listen for the ProjectSwitcher's "Link new repository" CTA and any other
+  // UI surfaces that want to open the SetupScreen on demand. We reset the
+  // forced flag once the user has an active project again so a successful
+  // SetupScreen submission restores the normal app shell.
+  useEffect(() => {
+    function onLinkNew() {
+      setSetupForced(true);
+    }
+    window.addEventListener("gitteam:link-new-repo", onLinkNew);
+    return () => window.removeEventListener("gitteam:link-new-repo", onLinkNew);
+  }, []);
+
+  useEffect(() => {
+    if (activeProject && setupForced) {
+      setSetupForced(false);
+    }
+  }, [activeProject, setupForced]);
 
   // Window focus → auto-pull if synced and no pending local changes
   useEffect(() => {
@@ -135,8 +166,12 @@ function App() {
     [initialized, loading, tickets],
   );
 
-  // First-time setup: full-screen SetupScreen
-  if (bootDone && syncStatus === "unconfigured") {
+  // First-time setup: full-screen SetupScreen only when the user has never
+  // linked a repository. If `projects > 0` but `activeProject === null` (e.g.
+  // after the user removes their active project), we render the normal app
+  // shell instead — the ProjectSwitcher pill in the header shows an empty
+  // state and the main area shows the NoProjectEmptyState card.
+  if (bootDone && (setupForced || (syncStatus === "unconfigured" && projects.length === 0))) {
     return (
       <div className="h-full bg-bg text-fg">
         <SetupScreen />
@@ -150,9 +185,9 @@ function App() {
     <div className="h-full flex flex-col bg-bg text-fg">
       <AppHeader onNewTicket={onNew} />
 
-      {dataDir ? (
+      {activeProject ? (
         <div className="px-4 py-1.5 text-xs text-fg-subtle font-mono border-b bg-bg">
-          {dataDir}
+          {activeProject.id}
         </div>
       ) : null}
 
@@ -168,7 +203,7 @@ function App() {
         ) : error && !initialized ? (
           <div className="h-full w-full flex flex-col items-center justify-center gap-3">
             <p className="text-fg-muted">Failed to initialize: {error}</p>
-            <Button variant="primary" onClick={() => void loadConfig()}>
+            <Button variant="primary" onClick={() => void loadProjects()}>
               <RefreshCw size={14} />
               Retry
             </Button>
@@ -195,6 +230,13 @@ function App() {
               Set up again
             </Button>
           </div>
+        ) : !activeProject && syncStatus === "unconfigured" ? (
+          // Projects > 0 but none active (e.g. user just removed the active
+          // one). Show the no-project card with a CTA that reopens
+          // SetupScreen.
+          <NoProjectEmptyState
+            onLinkRepo={() => setSetupForced(true)}
+          />
         ) : showEmpty ? (
           justSetup ? (
             <OnboardingState onCreate={onNew} />

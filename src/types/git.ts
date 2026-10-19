@@ -12,6 +12,20 @@ export interface GitConfig {
   last_sync_at: string | null;
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  repo_url: string;
+  last_sync_at: string | null;
+}
+
+export interface AddProjectInput {
+  url: string;
+  pat: string;
+  user_name: string;
+  user_email: string;
+}
+
 export interface TestConnectionResult {
   ok: boolean;
   head_sha: string | null;
