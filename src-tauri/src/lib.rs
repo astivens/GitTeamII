@@ -3357,6 +3357,10 @@ fn repo_full_name(repo_url: &str) -> Option<String> {
         return None;
     }
 
+    // A url pasted by hand can carry a query or a fragment: neither is part of
+    // the name, and leaving them in would ask GitHub about a repository that
+    // does not exist.
+    let path = path.split(['?', '#']).next().unwrap_or(path);
     let path = path.trim_start_matches('/').trim_end_matches(".git");
     let mut parts = path.split('/').filter(|part| !part.is_empty());
     let owner = parts.next()?;
@@ -3398,17 +3402,20 @@ fn collaborator_error_message(
             "GitHub has no user called @{}. Check the spelling of their user name.",
             username
         ),
-        401 => "GitHub rejected the token. It may be expired or revoked: create a new one and try again."
-            .to_string(),
         403 => {
             // The general mapping explains a 403 in terms of creating a
-            // repository, which is not what this call does. Granting access has
-            // its own reasons for being refused, so it says its own thing.
+            // repository, which is not what this call does. Two refusals are
+            // worth naming, and what the token reports is what tells them apart:
+            // a classic token without the `repo` scope, and an account that is
+            // simply not the one that manages this repository. A token that
+            // reports no scopes is the second case, not the first: fine-grained
+            // tokens report nothing, so "none" must not be read as "missing".
             let scopes = oauth_scopes.unwrap_or("").trim();
-            let need = if scopes.is_empty() {
-                "Granting access needs a token that can manage this repository: the owner's."
-            } else {
+            let has_repo_scope = scopes.split(',').any(|s| s.trim() == "repo");
+            let need = if !scopes.is_empty() && !has_repo_scope {
                 "The token is missing the `repo` scope, which granting access needs."
+            } else {
+                "Only a token that can manage this repository may grant access: the one in use belongs to another account, or lacks permission to manage it."
             };
             format!(
                 "GitHub refused to give @{} access to this board. {} (Scopes it has: {}.)",
@@ -5367,18 +5374,30 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             "Ana-Dev"
         );
         assert_eq!(normalize_github_username("ana").unwrap(), "ana");
+        // El límite de GitHub, de los dos lados.
+        assert_eq!(
+            normalize_github_username(&"a".repeat(39)).unwrap().len(),
+            39
+        );
 
         for bad in [
             "",
             "   ",
             "@",
+            "@@",
             "ana dev",
             "-ana",
             "ana-",
             "ana--dev",
+            "a--b",
             "ana/dev",
             "ana#dev",
             "ana_dev",
+            "ana.",
+            "ana,",
+            "ana@dev",
+            "@ana@dev",
+            "áná",
         ] {
             let error = normalize_github_username(bad).expect_err("must be rejected");
             assert!(!error.trim().is_empty(), "{:?} produced no reason", bad);
@@ -5402,10 +5421,31 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             repo_full_name("https://ghp_secret@github.com/astivens/board").as_deref(),
             Some("astivens/board")
         );
+        assert_eq!(
+            repo_full_name("https://user:pass@github.com/astivens/board").as_deref(),
+            Some("astivens/board")
+        );
+        assert_eq!(
+            repo_full_name("ssh://git@github.com:2222/astivens/board.git").as_deref(),
+            Some("astivens/board")
+        );
+        // Un query pegado de más no es parte del nombre del repositorio.
+        assert_eq!(
+            repo_full_name("https://github.com/astivens/board.git?x=1").as_deref(),
+            Some("astivens/board")
+        );
 
         // Otorgar acceso por usuario es una operación de GitHub: en otro host no
         // hay nada que preguntar, y decirlo acá es mejor que fallar más tarde.
         assert_eq!(repo_full_name("https://gitlab.com/astivens/board.git"), None);
+        assert_eq!(repo_full_name("https://github.com.other/astivens/board"), None);
+        // El host se lee después del último `@`: si no, una url se hace pasar
+        // por GitHub.
+        assert_eq!(
+            repo_full_name("https://github.com@evil.com/astivens/board"),
+            None
+        );
+        assert_eq!(repo_full_name("file:///home/anuar/boards/mine"), None);
         assert_eq!(repo_full_name("https://github.com/astivens"), None);
         assert_eq!(repo_full_name("/home/anuar/boards/mine"), None);
     }
@@ -5455,6 +5495,50 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         assert!(validation.contains("Validation Failed"), "{}", validation);
     }
 
+    #[test]
+    fn a_403_with_the_repo_scope_does_not_claim_the_scope_is_missing() {
+        // El header puede decir que el scope está: entonces no se puede afirmar
+        // que falte. Lo que reporta el token es lo que separa "le falta el
+        // scope" de "esta cuenta no administra el repositorio".
+        let body = r#"{"message":"Forbidden"}"#;
+        let message = collaborator_error_message(403, Some("repo"), body, "ana");
+        assert!(message.contains("ana"), "{}", message);
+        assert!(!message.contains("missing the `repo` scope"), "{}", message);
+        assert!(!message.contains("creating a repository"), "{}", message);
+    }
+
+    #[test]
+    fn a_403_from_granting_access_never_reads_as_repository_creation() {
+        let body = r#"{"message":"Forbidden"}"#;
+        for scopes in [
+            None,
+            Some(""),
+            Some("repo"),
+            Some("repo, workflow"),
+            Some("public_repo"),
+        ] {
+            let message = collaborator_error_message(403, scopes, body, "ana");
+            assert!(
+                !message.contains("creating a repository"),
+                "{:?} -> {}",
+                scopes,
+                message
+            );
+            assert!(message.contains("access"), "{}", message);
+        }
+    }
+
+    #[test]
+    fn a_status_without_a_case_of_its_own_still_uses_the_general_mapping() {
+        let body = r#"{"message":"Forbidden"}"#;
+        for status in [400u16, 401, 409, 422, 429, 500] {
+            assert_eq!(
+                collaborator_error_message(status, None, body, "ana"),
+                github_api_error(status, None, body)
+            );
+        }
+    }
+
     // ----- T5: el invitado acepta la invitación que GitHub dejó pendiente -----
 
     const PENDING_INVITATIONS: &str = r#"[
@@ -5489,8 +5573,28 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             .expect("an empty list is not a failure")
             .is_empty());
         assert!(pending_invitations_from_json("not json").is_err());
-        // Un elemento sin repositorio no se puede convertir en una invitación útil.
-        assert!(pending_invitations_from_json(r#"[{"id":1}]"#).is_err());
+        assert!(pending_invitations_from_json("{}").is_err());
+
+        // Una invitación a la que le falta el repositorio o el identificador no
+        // se convierte en algo a medias: se informa.
+        for half in [
+            r#"[{"id":1}]"#,
+            r#"[{"id":1,"repository":null}]"#,
+            r#"[{"repository":{"full_name":"a/b"}}]"#,
+            r#"[{"id":"7","repository":{"full_name":"a/b"}}]"#,
+        ] {
+            assert!(
+                pending_invitations_from_json(half).is_err(),
+                "accepted {:?}",
+                half
+            );
+        }
+
+        // Quién la manda es opcional: no poder decirlo no invalida la invitación.
+        let invites =
+            pending_invitations_from_json(r#"[{"id":1,"repository":{"full_name":"a/b"}}]"#)
+                .expect("must parse");
+        assert_eq!(invites[0].from, None);
     }
 
     #[test]

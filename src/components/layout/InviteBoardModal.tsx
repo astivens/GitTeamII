@@ -135,8 +135,8 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
         )}
 
         <p className="text-fg-subtle text-xs">
-          The link is not a key: this board is private, so the person receiving it
-          also needs access to the repository on GitHub.
+          The link is not a key: this board is private, so on the other side they
+          also need access to the repository on GitHub.
         </p>
 
         <div
