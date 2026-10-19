@@ -86,6 +86,28 @@ Findings — todos **informational / no bloqueantes**, quedan como trabajo poste
 | R3-002 | reliability | `lib.rs:1668-1674` | WARNING | el mismo ganador escalar silencioso de R4-2 visto desde reliability: un merge parseable pero equivocado no deja rastro para detectarlo ni revertirlo. |
 | R3-003 | reliability | `lib.rs:1589`, `merge_driver_cli.rs` | SUGGESTION | la cobertura con git real sólo ejercita un ticket en la raíz del repo — justo el acoplamiento `MERGE_DRIVER_PATTERN` ↔ `tickets_dir()` que el propio código documenta como riesgo de fallo silencioso. |
 
+### L9 decidido: los tickets viven en repos dedicados (2026-10-18)
+
+Respuesta del usuario: **opción A**. Un proyecto de tickets apunta siempre a un repo de tickets; el repo de la app no participa.
+
+Evidencia que hizo la decisión barata: el proyecto vivo (`~/.gitteam/projects/royero-labs`) apunta hoy a `astivens/Royero-Labs` —el repo de la app— y tiene **0 tickets**: 0 en el worktree, 0 trackeados, 0 commits con `TKT-*` en `origin/HEAD`. No hay nada que migrar: se re-apunta el proyecto a un repo de tickets y queda.
+
+Consecuencias: (1) el motor **no cambia** — un proyecto ya es "un repo cuyo root tiene los tickets" y `tickets_dir()` sigue igual al root; (2) "tickets en un subdirectorio" queda como costura inactiva (`repo_root()`/`tickets_dir()` ya están separadas, con los tres cambios acoplados documentados en `multi-user-foundations.md`); (3) compartir un board pasa a ser "compartir el repo de tickets", sin código de la app de por medio.
+
+### Seguridad: el PAT ya no queda en el disco (`d9e08f1`, `Risk: item 2`)
+
+Hallazgo (reportado al usuario antes de tocar nada): `git clone <url-con-token>` y `git remote add origin <url-con-token>` persisten el token en `<clone>/.git/config` como `remote.origin.url`, y **todas** las rutas de red dependían de esa URL guardada, así que el token se escribía una vez y se usaba para siempre —en backups, en `git remote -v`, en cualquier copia del directorio—. Su propio clone lo probaba.
+
+Arreglo: la URL guardada queda sin credencial y cada comando de red la reescribe por su duración con el mecanismo propio de git (`-c url.<con-credential>.insteadOf=<limpia>`). `run_git` inyecta el override **sólo** para `fetch|pull|push|ls-remote|clone`, así que los comandos locales no pagan lectura de keyring; los remotos no-HTTP (un path local, una URL SSH) no se reescriben ni por el override ni por el reparador; y un clone viejo con el token guardado **se repara solo** en el próximo pull/setup. En `setup` la credencial sale de los valores en mano, porque ahí el keyring y `config.json` se escriben **después** del clone.
+
+Verificación: 49 tests de unidad + 2 de integración verdes. Cinco probes nuevos con git real: el clone guarda la URL limpia y no persiste la regla; el fetch y el push pasan por el override; el reparador no toca remotos no-HTTP ni falla sin `origin`; y la lista de verbos que piden credencial no se ensancha. RED demostrado por mutación: neutralizar el `set-url` del reparador hace fallar el test. Verificador independiente sobre el diff: **S1–S5 pass**, y encontró un defecto real del código nuevo —el reparador *sí* reescribía remotos no-HTTP (`ssh://git@host` → `ssh://host`)— ya arreglado con un guard y pineado por test.
+
+RDD del rango pendiente (`fc7a2e4..d9e08f1`, 9 paths / 562 líneas): `medium`, `review_due: false`, `under_budget` → no corresponde review nativo; el boundary sigue pendiente en el slice.
+
+**Acción del usuario**: reiniciar la app y sincronizar **una vez** (ahí corre la reparación del clone existente) y **rotar el token**, porque estuvo escrito en texto plano en el disco.
+
+Follow-ups que dejó el verificador (informativos, no ejecutados, no autorizan scope por sí solos): una URL pegada en el formulario *con* token se guarda tal cual en `config.json` (pre-existente, igual en `6da1626`); y la credencial ahora viaja en `argv` (`ps` visible), mismo patrón que ya usaban el watcher y el test de conexión, sin escritura a disco.
+
 ## Riesgos
 
 - **Frontmatter es dato persistido** (ítem 1): cambiar el render podía reescribir cualquier ticket. Mitigado con `links` emitido **solo cuando no está vacío** y tests de no-regresión para el caso sin links y para archivos legacy.
@@ -134,6 +156,9 @@ Findings — todos **informational / no bloqueantes**, quedan como trabajo poste
 - **L11 (2026-10-18)** — Pregunta al usuario: preparar el corte en PRs encadenados o seguir con producto. Respuesta verbatim: *"Como gustes"* → decisión delegada. Se eligió **publicar en formato revisable en vez de seguir agregando features**: la rama acumula 28 commits y ~7700 líneas (adición + borrado) y existe **sólo en este disco**, así que el riesgo dominante no era la falta de features sino que todo el trabajo (incluido el fix del sync destructivo) no está publicado en ningún lado.
   Corte en 8 slices con una sola pasada honesta (skill `chained-pr`): ramas `feat/01..08`, cada una apuntando al último commit de su rango contiguo, con el diff de cada PR = exactamente un slice. 9 boundaries verificados en worktree aislado (`cargo test` + `tsc`), 9/9 verdes, con `main` como control (que tiene 0 tests: la suite arranca en el slice 3).
   Pendiente y **gated al humano**: el push de las 9 ramas y la creación de los 8 PR (`open-chain.sh`), porque push y PR siguen siendo decisiones del usuario bajo política ordinaria del repo.
+- **L12 (2026-10-18)** — La cadena se publicó: 8 PR abiertos en `astivens/GitTeamII` (#1 → #8, con base encadenada y el diagrama de dependencias) y el review nativo del slice 7 —el único candidato `high`— **aprobado**, con la autoridad quemada y cero correcciones. Los 8 findings no bloqueantes viven en `### Review nativo (RDD)`.
+- **L13 (2026-10-18)** — Dirección elegida por el usuario: **L9 = repo dedicado de tickets** (`### L9 decidido`) y después el diseño del flujo de compartir. El bloque siguiente de trabajo es ese diseño; todavía sin empezar.
+- **L14 (2026-10-18)** — Hallazgo de seguridad y arreglo: el PAT quedaba en texto plano en `<proyecto>/repo/.git/config` (`### Seguridad`). Commit `d9e08f1`, `Risk: item 2`, verificado por subagente independiente, sin review nativo debido (`under_budget`).
 
 ## Criterios de aceptación
 

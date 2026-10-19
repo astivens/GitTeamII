@@ -26,6 +26,47 @@ export interface AddProjectInput {
   user_email: string;
 }
 
+/**
+ * Creating a board: the repository itself is created by the backend on GitHub.
+ * Every field is optional in practice — an empty `name` becomes
+ * `<project>-board`, and an empty `pat` / `user_name` / `user_email` reuse the
+ * active project's saved ones.
+ */
+export interface BoardCreateInput {
+  name: string;
+  pat: string;
+  user_name: string;
+  user_email: string;
+}
+
+/** What an invitation link points to, as the backend reads it. */
+export interface InviteDetails {
+  repo_url: string;
+  board: string | null;
+  from: string | null;
+}
+
+/** An invitation GitHub is holding for someone, until they accept it. */
+export interface PendingInvitation {
+  id: number;
+  /** The repository's full name, `owner/repo`. */
+  repo: string;
+  /** Who sent it, when GitHub says. */
+  from: string | null;
+}
+
+/**
+ * What a `gitteam://` link the operating system handed to the app turned out to
+ * be. Only an invitation opens the join flow; the other kind is reported, so a
+ * click that leads nowhere says so instead of failing in silence.
+ */
+export interface LinkIntake {
+  /** The first invitation among the received links, ready to show before cloning. */
+  invite: string | null;
+  /** The first GitTeam link that was not an invitation, when there was no invitation. */
+  not_an_invitation: string | null;
+}
+
 export interface TestConnectionResult {
   ok: boolean;
   head_sha: string | null;

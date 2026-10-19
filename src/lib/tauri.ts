@@ -3,9 +3,13 @@ import type { CreateTicketInput, Ticket } from "../types/ticket";
 import type { Graph } from "../types/graph";
 import type {
   AddProjectInput,
+  BoardCreateInput,
   CommitResult,
   GitConfig,
   GitStatus,
+  InviteDetails,
+  LinkIntake,
+  PendingInvitation,
   Project,
   PullResult,
   PushResult,
@@ -27,6 +31,75 @@ export async function getActiveProject(): Promise<Project | null> {
 
 export async function addProject(input: AddProjectInput): Promise<Project> {
   return invoke<Project>("add_project", { input });
+}
+
+/**
+ * Creates a private tickets repository on GitHub and links it as the active
+ * project. A board is a repository of its own, so the application's repository
+ * is never involved.
+ */
+export async function boardCreate(input: BoardCreateInput): Promise<Project> {
+  return invoke<Project>("board_create", { input });
+}
+
+/**
+ * The invitation for the active board: the string the user passes to whoever
+ * they want on it. It carries no credential, because access to a private board
+ * is granted on GitHub rather than delegated by the link.
+ */
+export async function boardInviteLink(): Promise<string> {
+  return invoke<string>("board_invite_link");
+}
+
+/**
+ * Reads a pasted invitation so the user can see which board it is for, and who
+ * it came from, before anything is cloned.
+ */
+export async function boardParseInvite(text: string): Promise<InviteDetails> {
+  return invoke<InviteDetails>("board_parse_invite", { text });
+}
+
+/**
+ * Gives a GitHub user access to the active board, by their user name. It is the
+ * owner's action, and the invitation stays pending until the other person
+ * accepts it on GitHub.
+ */
+export async function boardInviteCollaborator(username: string): Promise<string> {
+  return invoke<string>("board_invite_collaborator", { username });
+}
+
+/**
+ * The invitations GitHub has pending for whoever owns this token. With a
+ * repository url, only the invitation for that board comes back.
+ */
+export async function githubPendingInvitations(
+  pat: string,
+  repoUrl?: string,
+): Promise<PendingInvitation[]> {
+  return invoke<PendingInvitation[]>("github_pending_invitations", {
+    pat,
+    repoUrl: repoUrl ?? null,
+  });
+}
+
+/** Accepts a pending invitation, so joining does not depend on GitHub's mail. */
+export async function githubAcceptInvitation(
+  pat: string,
+  invitationId: number,
+): Promise<void> {
+  return invoke<void>("github_accept_invitation", { pat, invitationId });
+}
+
+/**
+ * Turns the links the operating system handed to the app — the one the app was
+ * launched with, and any that arrived while it was already running — into a
+ * single decision. Which shape is an invitation is decided by the backend, the
+ * same place that reads a pasted one, so the format is written once.
+ */
+export async function gitteamLinkIntake(
+  urls: string[],
+): Promise<LinkIntake> {
+  return invoke<LinkIntake>("gitteam_link_intake", { urls });
 }
 
 export async function removeProject(projectId: string): Promise<void> {

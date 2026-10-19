@@ -11,6 +11,7 @@ import type { CreateTicketInput, Ticket, TicketStatus } from "../types/ticket";
 import type { Graph } from "../types/graph";
 import type {
   AddProjectInput,
+  BoardCreateInput,
   GitConfig,
   Project,
   SyncStatus,
@@ -113,6 +114,8 @@ interface TicketsState {
   loadProjects: () => Promise<void>;
   loadActiveProject: () => Promise<void>;
   addProject: (input: AddProjectInput) => Promise<Project>;
+  createBoard: (input: BoardCreateInput) => Promise<Project>;
+  adoptActiveProject: (project: Project) => Promise<Project>;
   removeProject: (id: string) => Promise<void>;
   removeActiveProject: () => Promise<void>;
   switchProject: (id: string) => Promise<Project>;
@@ -450,47 +453,65 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     addProject: async (input: AddProjectInput): Promise<Project> => {
       set({ syncStatus: "syncing", syncError: null });
       try {
-        const project = await api.addProject(input);
-        // The backend makes the new project active — refresh the list so the
-        // picker (future UI) reflects it.
-        const projects = await api.listProjects();
-        set({
-          projects,
-          activeProject: project,
-          gitConfig: projectToGitConfig(project),
-          dataDir: project.id,
-          lastSyncedAt: new Date().toISOString(),
-          syncStatus: "synced",
-          syncError: null,
-        });
-
-        // Initialize the just-activated project: load tickets, start watcher.
-        const tickets = await api.listTickets();
-        set({
-          tickets,
-          initialized: true,
-          loading: false,
-        });
-        try {
-          await get().startWatcher();
-          const sha = await api.gitCurrentRemoteSha();
-          if (sha) {
-            set({ remoteSha: sha });
-          }
-        } catch {
-          // Non-fatal
-        }
-        // Welcome the user with the onboarding variant of EmptyState on first
-        // run. Auto-clears on the first create/update call.
-        if (tickets.length === 0) {
-          set({ justSetup: true });
-        }
-        return project;
+        return await get().adoptActiveProject(await api.addProject(input));
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         set({ syncStatus: "error", syncError: msg });
         throw e;
       }
+    },
+
+    // A board is a private tickets repository the backend creates on GitHub and
+    // links through the same path as any other project, so once it exists
+    // everything the frontend owes that state is identical to addProject.
+    createBoard: async (input: BoardCreateInput): Promise<Project> => {
+      set({ syncStatus: "syncing", syncError: null });
+      try {
+        return await get().adoptActiveProject(await api.boardCreate(input));
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        set({ syncStatus: "error", syncError: msg });
+        throw e;
+      }
+    },
+
+    // The backend makes a newly created project active. Everything the frontend
+    // owes that state lives here: the refreshed list, the config, and the just
+    // activated project's tickets plus its watcher.
+    adoptActiveProject: async (project: Project): Promise<Project> => {
+      const projects = await api.listProjects();
+      set({
+        projects,
+        activeProject: project,
+        gitConfig: projectToGitConfig(project),
+        dataDir: project.id,
+        lastSyncedAt: new Date().toISOString(),
+        syncStatus: "synced",
+        syncError: null,
+      });
+
+      // Initialize the just-activated project: load tickets, start watcher.
+      const tickets = await api.listTickets();
+      set({
+        tickets,
+        initialized: true,
+        loading: false,
+      });
+      try {
+        await get().startWatcher();
+        const sha = await api.gitCurrentRemoteSha();
+        if (sha) {
+          set({ remoteSha: sha });
+        }
+      } catch {
+        // Non-fatal
+      }
+      // Welcome the user with the onboarding variant of EmptyState on first
+      // run. Auto-clears on the first create/update call.
+      if (tickets.length === 0) {
+        set({ justSetup: true });
+      }
+      return project;
     },
 
     removeProject: async (id: string) => {

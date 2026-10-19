@@ -5,10 +5,11 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { ChevronDown, Plus, Search } from "lucide-react";
+import { ChevronDown, Plus, Search, UserPlus } from "lucide-react";
 import { useTicketsStore } from "../../store/tickets";
 import type { Project, SyncStatus } from "../../types/git";
 import { pushToast } from "../../lib/toast";
+import { InviteBoardModal } from "./InviteBoardModal";
 
 /**
  * Project switcher — pill in the app header that opens an anchored dropdown
@@ -26,6 +27,7 @@ export function ProjectSwitcher() {
   const switchProject = useTicketsStore((s) => s.switchProject);
 
   const [open, setOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -325,11 +327,43 @@ export function ProjectSwitcher() {
 
           {/* Divider + CTA */}
           <div
+            className="flex flex-col"
             style={{
               borderTop: "1px solid var(--border)",
               padding: 8,
+              gap: 4,
             }}
           >
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setInviteOpen(true);
+              }}
+              className="w-full flex items-center"
+              style={{
+                padding: "8px 10px",
+                borderRadius: "var(--radius-md)",
+                background: "transparent",
+                color: "var(--fg-muted)",
+                fontSize: "var(--text-sm)",
+                gap: 8,
+                cursor: "pointer",
+                border: 0,
+                transition: "background-color 120ms, color 120ms",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--bg-subtle)";
+                e.currentTarget.style.color = "var(--fg)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+                e.currentTarget.style.color = "var(--fg-muted)";
+              }}
+            >
+              <UserPlus size={14} />
+              Invite someone
+            </button>
             <button
               type="button"
               onClick={handleLinkNew}
@@ -366,6 +400,12 @@ export function ProjectSwitcher() {
           </div>
         </div>
       ) : null}
+
+      <InviteBoardModal
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        board={activeProject?.name ?? "this board"}
+      />
     </div>
   );
 }

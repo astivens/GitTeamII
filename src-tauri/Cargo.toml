@@ -23,6 +23,24 @@ tauri-plugin-opener = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
+# A click on an invitation has to open the app. The scheme itself is declared
+# in tauri.conf.json (`plugins.deep-link.desktop.schemes`): without that entry
+# the plugin ignores a `gitteam://…` that arrives as an argument.
+tauri-plugin-deep-link = "2"
+# tauri-plugin-deep-link 2.6.2 builds `ini::ParseOption` field by field, and
+# rust-ini 0.21.3 added fields to that struct without a major bump, so the
+# plugin stops compiling. Already in the dependency graph via
+# tauri-plugin-deep-link on Linux; pinned to the last release it was written
+# against so the resolver cannot pick the broken one (0.21.2, the next one down,
+# is yanked). The plugin's v3 branch adds `..Default::default()`, so the pin goes
+# away when a stable release of it lands.
+rust-ini = "=0.21.1"
+# On Linux and Windows the OS does not hand the URL to the app that is already
+# running: it launches a second instance with the URL as an argument. The
+# `deep-link` feature forwards that argument to the plugin above before calling
+# the callback, so the click lands in the window that already exists instead of
+# in a new copy. Must be the first plugin registered.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -34,6 +52,14 @@ dirs = "5"
 getrandom = "0.3"
 keyring = { version = "3", features = ["linux-native", "apple-native", "windows-native"] }
 tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-thread", "time"] }
+# Already in the dependency graph via tauri, but with no TLS backend: the app
+# itself never spoke HTTPS, git does that. Creating a board has to call the
+# GitHub API, so this promotes the crate and brings in rustls as the TLS stack
+# (hyper-rustls, tokio-rustls, rustls-platform-verifier, aws-lc-rs). It trusts
+# the platform certificate store, so no system OpenSSL headers are involved —
+# but aws-lc-rs compiles a C library, so building wants cmake and a C toolchain
+# (Linux already needs both for tauri).
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

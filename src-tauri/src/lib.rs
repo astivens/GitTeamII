@@ -8,7 +8,7 @@ use chrono::Utc;
 use gray_matter::engine::YAML;
 use gray_matter::{Matter, Pod};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -407,9 +407,23 @@ fn read_git_config() -> Result<Option<GitConfig>, String> {
     Ok(Some(config))
 }
 
+/// The config as it goes to disk: with the credential taken out of the url.
+///
+/// A url pasted into the connect form can carry a token — GitHub itself prints
+/// `https://x-access-token:<token>@github.com/owner/repo.git` for a token clone —
+/// and that token would then sit in plaintext in `config.json` for as long as
+/// the project exists. The credential belongs to the keyring and nowhere else,
+/// and it is not lost by dropping it here: `load_pat` still has it.
+fn config_to_persist(config: &GitConfig) -> GitConfig {
+    GitConfig {
+        repo_url: strip_userinfo(&config.repo_url),
+        ..config.clone()
+    }
+}
+
 fn write_git_config(config: &GitConfig) -> Result<(), String> {
     let path = config_path()?;
-    let content = serde_json::to_string_pretty(config)
+    let content = serde_json::to_string_pretty(&config_to_persist(config))
         .map_err(|e| format!("serialize config failed: {}", e))?;
     fs::write(&path, content).map_err(|e| format!("write config failed: {}", e))?;
     Ok(())
@@ -418,9 +432,18 @@ fn write_git_config(config: &GitConfig) -> Result<(), String> {
 // ----- url helpers -----
 
 fn with_authenticated_url(url: &str, pat: &str) -> String {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
+    let lowered = url.to_ascii_lowercase();
+    // The scheme is matched case-insensitively. A url pasted as `HTTPS://…` used
+    // to fall through to the `unwrap_or` arm and come out double-wrapped as
+    // `https://<pat>@HTTPS://…`: a broken remote, and the token behind a shape
+    // the redactor cannot recover once the first `/` closes the authority.
+    let without_scheme = ["https://", "http://"]
+        .iter()
+        .find_map(|prefix| {
+            lowered
+                .strip_prefix(prefix)
+                .map(|_| &url[prefix.len()..])
+        })
         .unwrap_or(url);
 
     let (host_with_userinfo, path) = match without_scheme.find('/') {
@@ -444,6 +467,81 @@ fn with_authenticated_url(url: &str, pat: &str) -> String {
     }
 }
 
+/// `git -c` arguments that inject the credential into a single command.
+///
+/// A credentialed url handed to `git clone` or `git remote add` is persisted as
+/// `remote.origin.url`, which parks the token in plaintext in the clone's
+/// `.git/config`: it survives in backups, shows up in `git remote -v`, and
+/// travels with any copy of the directory. The stored remote stays
+/// credential-free instead, and each network command rewrites it to its
+/// credentialed form for its own duration using git's own mechanism.
+fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
+    // A local path or any other non-HTTP remote carries no credential to
+    // inject, and rewriting one would turn a working path into a broken url.
+    if !(config_url.starts_with("http://") || config_url.starts_with("https://")) {
+        return Vec::new();
+    }
+    let auth_url = with_authenticated_url(config_url, pat);
+    let clean_url = strip_userinfo(&auth_url);
+    vec![
+        "-c".to_string(),
+        format!("url.{}.insteadOf={}", auth_url, clean_url),
+    ]
+}
+
+/// The override for the active project. Best effort on purpose: with no
+/// connected project, no saved PAT, or a non-HTTP remote there is nothing to
+/// inject, and a command that needs no credential must not fail because of it.
+fn active_remote_override() -> Vec<String> {
+    let Ok(Some(config)) = read_git_config() else {
+        return Vec::new();
+    };
+    let Ok(pat) = load_pat() else {
+        return Vec::new();
+    };
+    credentialed_remote_override(&config.repo_url, &pat)
+}
+
+/// Whether a `git` invocation talks to the remote and therefore needs the
+/// credential. Keeping this list tight means local commands pay no keyring
+/// lookup.
+fn needs_credential(args: &[&str]) -> bool {
+    matches!(
+        args.first().copied(),
+        Some("fetch" | "pull" | "push" | "ls-remote" | "clone")
+    )
+}
+
+/// Rewrites a stored remote url that still carries userinfo to its clean form,
+/// repairing clones made before the credential was kept out of git's config.
+/// Returns whether the stored url had to be rewritten.
+fn strip_stored_userinfo(dir: &Path) -> bool {
+    let stored = match std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["remote", "get-url", "origin"])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => return false,
+    };
+    // Only HTTP(S) remotes carry a credential in their userinfo. In an SSH url
+    // the `git@host` is part of the addressing, and in a local path an `@` is
+    // just a character: "repairing" either one breaks a working remote.
+    if !(stored.starts_with("http://") || stored.starts_with("https://")) {
+        return false;
+    }
+    let clean = strip_userinfo(&stored);
+    if clean == stored {
+        return false;
+    }
+    std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["remote", "set-url", "origin", &clean])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn strip_userinfo(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let (scheme, rest) = url.split_at(scheme_end + 3);
@@ -452,6 +550,50 @@ fn strip_userinfo(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+/// Takes the credential out of any url a message may be carrying.
+///
+/// The url this app hands git carries the token: as the password
+/// (`https://x-access-token:<token>@host/…`) for GitHub, as the user
+/// (`https://<token>@host/…`) for any other host. Git's own messages anonymise
+/// the userinfo before printing a remote — measured, both forms come back as
+/// `https://host/path` — so the reproduction lives on this side of the boundary:
+/// `run_git_with_credential` prepends the `url.<credentialed>.insteadOf=`
+/// override to `run_git`'s arguments and `run_git` reports those arguments.
+/// Everything that can reach the user or a log goes through here, which closes
+/// that and keeps a git or curl that prints the url as given from handing the
+/// token back.
+///
+/// Only http(s) is touched, the rule the stored remote follows as well: in an
+/// `ssh://git@host` url the `git@` is addressing, not a secret.
+fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(sep) = rest.find("://") {
+        let (head, after) = rest.split_at(sep + 3);
+        out.push_str(head);
+        // The scheme is what ends at `://` — "https" in `https://…`, and also in
+        // the override's key, where it reads `url.https://…`.
+        let scheme = head[..head.len() - 3].to_ascii_lowercase();
+        let is_web = scheme.ends_with("http") || scheme.ends_with("https");
+        // The authority ends at the first delimiter, so `scheme://user@host/path`
+        // is redacted even though the `@` sits before the slash.
+        let end = after
+            .find(|c: char| matches!(c, '/' | '?' | '#' | ' ' | '\t' | '\n' | '\r' | '"' | '\''))
+            .unwrap_or(after.len());
+        let (authority, tail) = after.split_at(end);
+        match (is_web, authority.rfind('@')) {
+            (true, Some(at)) => {
+                out.push_str("***");
+                out.push_str(&authority[at..]);
+            }
+            _ => out.push_str(authority),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
 }
 
 fn extract_repo_name(url: &str) -> String {
@@ -500,25 +642,55 @@ async fn run_git(
         Some((n, e)) => build_git_cmd_with_user(dir, n, e),
         None => build_git_cmd(dir),
     };
+    // The credential is injected per command and never stored: see
+    // `credentialed_remote_override`.
+    if needs_credential(args) {
+        for a in active_remote_override() {
+            cmd.arg(a);
+        }
+    }
     for a in args {
         cmd.arg(a);
     }
+    // `run_git_with_credential` prepends the credential override to this same
+    // slice, so the arguments can carry the token. They are redacted once, here,
+    // and both messages below use that rendering: a failed `fetch` during setup
+    // must not print the token it was given.
+    let invoked = redact_credentials(&args.join(" "));
     let fut = cmd.output();
     let output = timeout(Duration::from_secs(timeout_secs), fut)
         .await
-        .map_err(|_| format!("git {} timed out after {}s", args.join(" "), timeout_secs))?
+        .map_err(|_| format!("git {} timed out after {}s", invoked, timeout_secs))?
         .map_err(|e| format!("git spawn failed: {}", e))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
         return Err(format!(
             "git {} failed (exit {}): {}",
-            args.join(" "),
+            invoked,
             output.status,
-            stderr.trim()
+            redact_credentials(stderr.trim())
         ));
     }
     Ok(stdout)
+}
+
+/// Runs one network command with the credential of a project that is not active
+/// yet. During setup the keyring entry and `config.json` are written *after* the
+/// clone, so `active_remote_override` cannot resolve them: there the override
+/// has to come from the values already in hand.
+async fn run_git_with_credential(
+    dir: &Path,
+    config_url: &str,
+    pat: &str,
+    args: &[&str],
+    timeout_secs: u64,
+    with_user: Option<(&str, &str)>,
+) -> Result<String, String> {
+    let override_args = credentialed_remote_override(config_url, pat);
+    let mut all: Vec<&str> = override_args.iter().map(|s| s.as_str()).collect();
+    all.extend_from_slice(args);
+    run_git(dir, &all, timeout_secs, with_user).await
 }
 
 async fn git_head(dir: &Path) -> Result<String, String> {
@@ -1326,7 +1498,12 @@ async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectio
             error: Some(format!("Failed to run git: {}", e)),
         }),
         Ok(Ok(output)) if !output.status.success() => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            // Git anonymises the userinfo in its own messages, and the url handed
+            // to `ls-remote` here is the credentialed one: what this command says
+            // goes to the connect form, so it is redacted as well.
+            let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr))
+                .trim()
+                .to_string();
             let user_msg = if stderr.is_empty() {
                 format!("git ls-remote failed with exit {}", output.status)
             } else {
@@ -1404,6 +1581,8 @@ async fn setup_repo_inner(
     let remote_head = test.head_sha.clone().unwrap_or_default();
 
     let auth_url = with_authenticated_url(&config.repo_url, &pat);
+    // What goes into `.git/config`: the same remote, without the credential.
+    let clean_url = strip_userinfo(&auth_url);
 
     let is_git_repo = dir.join(".git").exists();
     let dir_is_empty = dir.exists()
@@ -1417,7 +1596,10 @@ async fn setup_repo_inner(
     if !dir.exists() || (dir_is_empty && !is_git_repo) {
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
         let mut cmd = Command::new("git");
-        cmd.arg("clone").arg(&auth_url).arg(&dir);
+        // Cloning through the credential override keeps the token out of the
+        // clone's `.git/config`, where a credentialed url would be persisted.
+        cmd.args(&credentialed_remote_override(&config.repo_url, &pat));
+        cmd.arg("clone").arg(&clean_url).arg(&dir);
         // Cloning someone's real repository can legitimately take minutes: one
         // with a committed node_modules runs to tens of thousands of files. The
         // old 60s cap killed the clone mid-checkout, which left a complete
@@ -1438,7 +1620,9 @@ async fn setup_repo_inner(
             Ok(Ok(output)) => output,
         };
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr))
+                .trim()
+                .to_string();
             let _ = fs::remove_dir_all(&dir);
             return Err(format!("git clone failed: {}", stderr));
         }
@@ -1471,7 +1655,7 @@ async fn setup_repo_inner(
 
         let mut cmd = Command::new("git");
         cmd.current_dir(&dir);
-        cmd.args(&["remote", "add", "origin", &auth_url]);
+        cmd.args(&["remote", "add", "origin", &clean_url]);
         let status = timeout(Duration::from_secs(15), cmd.status())
             .await
             .map_err(|_| "git remote add timed out".to_string())?
@@ -1480,7 +1664,8 @@ async fn setup_repo_inner(
             return Err("git remote add failed".to_string());
         }
 
-        let output = run_git(&dir, &["fetch"], 300, None).await?;
+        let output =
+            run_git_with_credential(&dir, &config.repo_url, &pat, &["fetch"], 300, None).await?;
         let _ = output;
 
         let reset_main = run_git(&dir, &["reset", "--hard", "origin/main"], 60, None).await;
@@ -1503,10 +1688,18 @@ async fn setup_repo_inner(
             return Err("Data directory already initialized with a different repository. Please disconnect first.".to_string());
         }
 
-        run_git(&dir, &["fetch"], 300, None).await?;
+        // A clone made by an older build stored the credential in `.git/config`;
+        // repair it before touching the remote again.
+        if strip_stored_userinfo(&dir) {
+            eprintln!("[gitteam] removed a credential from the stored remote url");
+        }
 
-        let pull_status = run_git(
+        run_git_with_credential(&dir, &config.repo_url, &pat, &["fetch"], 300, None).await?;
+
+        let pull_status = run_git_with_credential(
             &dir,
+            &config.repo_url,
+            &pat,
             &["pull", "--rebase", "--autostash"],
             300,
             Some((&config.git_user_name, &config.git_user_email)),
@@ -1544,7 +1737,12 @@ async fn setup_repo_inner(
 
     let mut config_to_save = config.clone();
     config_to_save.last_sync_at = Some(now_iso());
-    write_git_config(&config_to_save)?;
+    // The value that is written and the value that is returned are the same one:
+    // the frontend renders this url — the project chip's tooltip, the project
+    // list — so a token pasted into the connect form must not travel back to a
+    // screen after having been kept out of the file.
+    let stored = config_to_persist(&config_to_save);
+    write_git_config(&stored)?;
 
     let _ = run_git(
         &dir,
@@ -1568,7 +1766,7 @@ async fn setup_repo_inner(
     let head = git_head(&dir).await.unwrap_or(remote_head);
 
     Ok(SetupResult {
-        config: config_to_save,
+        config: stored,
         head_sha: head,
         files_count,
     })
@@ -1892,6 +2090,12 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
         eprintln!("[gitteam] could not configure the ticket merge driver: {}", e);
     }
 
+    // Same reason as the driver above: a clone made by an older build stored the
+    // credential in `.git/config`, and this is the run that clears it.
+    if strip_stored_userinfo(&dir) {
+        eprintln!("[gitteam] removed a credential from the stored remote url");
+    }
+
     run_git(&dir, &["fetch"], 300, None).await?;
 
     let count_output = run_git(&dir, &["log", "HEAD..@{u}", "--oneline"], 60, None)
@@ -2006,6 +2210,9 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     }
 
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
+    for a in active_remote_override() {
+        cmd.arg(a);
+    }
     if upstream_check.is_err() {
         cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
@@ -2168,6 +2375,9 @@ async fn git_commit_ticket(
 
     let mut push_cmd =
         build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
+    for a in active_remote_override() {
+        push_cmd.arg(a);
+    }
     if upstream_check.is_err() {
         push_cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
@@ -2527,7 +2737,7 @@ async fn git_start_watcher(
                         .map(|s| s.to_string())
                 }
                 Ok(Ok(output)) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr));
                     eprintln!(
                         "[gitteam watcher] ls-remote failed (exit {}): {}",
                         output.status,
@@ -2701,6 +2911,841 @@ async fn add_project(input: AddProjectInput) -> Result<Project, String> {
     })
 }
 
+// ----- GitHub API: creating a board -----
+
+/// A failed GitHub call. Only a duplicate name is worth retrying.
+struct GithubError {
+    retryable: bool,
+    message: String,
+}
+
+/// GitHub repository names accept letters, digits, `.`, `-` and `_`. Everything
+/// else folds to `-`, runs collapse, and the ends are trimmed, so a pasted
+/// label like `Royero Labs!` becomes a usable repository name.
+fn sanitize_board_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '.');
+    if trimmed.is_empty() {
+        "board".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The name a board gets when the user does not pick one: the project it
+/// belongs to, so `royero-labs` yields `royero-labs-board`.
+fn default_board_name(project_name: Option<&str>) -> String {
+    match project_name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("{}-board", sanitize_board_name(name)),
+        None => "gitteam-board".to_string(),
+    }
+}
+
+/// `base`, `base-2`, `base-3`, … GitHub answers a duplicate name with 422, so
+/// the caller walks these until one is accepted. Never returns an empty list.
+fn board_name_candidates(base: &str, attempts: u32) -> Vec<String> {
+    let mut names = vec![base.to_string()];
+    for n in 2..=attempts.max(1) {
+        names.push(format!("{}-{}", base, n));
+    }
+    names
+}
+
+/// Whether a failed create means "this name is taken" — the one failure worth
+/// retrying with a different name.
+fn github_name_taken(status: u16, body: &str) -> bool {
+    status == 422 && body.contains("already exists")
+}
+
+/// The `message` of a GitHub error body, which reads better than the raw JSON,
+/// or `None` when the body is not JSON or carries no message.
+fn first_json_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .and_then(|e| e.first())
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .or_else(|| value.get("message").and_then(|m| m.as_str()))
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+}
+
+/// A short single-line form of an unexpected body, for an error message.
+fn snippet(body: &str) -> String {
+    let one_line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return "no response body".to_string();
+    }
+    let cut: String = one_line.chars().take(200).collect();
+    if one_line.chars().count() > 200 {
+        format!("{}…", cut)
+    } else {
+        cut
+    }
+}
+
+/// Turns a failed GitHub response into something the user can act on. The case
+/// worth the care is a token without the `repo` scope: GitHub answers 403, or a
+/// deliberately vague 404, and never says which scope is missing — the scopes
+/// header is the only honest source.
+fn github_api_error(status: u16, oauth_scopes: Option<&str>, body: &str) -> String {
+    let scopes = oauth_scopes.unwrap_or("").trim();
+    let has_repo_scope = scopes.split(',').any(|s| s.trim() == "repo");
+    match status {
+        401 => "GitHub rejected the token. It may be expired or revoked: create a new one and try again.".to_string(),
+        403 | 404 if !has_repo_scope => {
+            // An absent header is normal for a fine-grained token, so "no
+            // scopes" must not be read as "no permissions": say what is needed
+            // instead of asserting what the token has.
+            let explanation = if scopes.is_empty() {
+                "GitHub reported no scopes for this token, which is normal for a fine-grained token. Creating a repository needs permission to create repositories; a classic token is missing the `repo` scope otherwise."
+            } else {
+                "The token is missing the `repo` scope, which is required to create a repository."
+            };
+            format!(
+                "{} Scopes it has: {}.",
+                explanation,
+                if scopes.is_empty() { "none" } else { scopes }
+            )
+        }
+        403 => "GitHub refused the request: this token's permissions do not allow creating a repository.".to_string(),
+        422 => format!(
+            "GitHub rejected the repository: {}.",
+            first_json_message(body).unwrap_or_else(|| "the request was rejected".to_string())
+        ),
+        other => format!("GitHub returned {}: {}", other, snippet(body)),
+    }
+}
+
+/// The token to create the board with: what the user just typed wins, otherwise
+/// the active project's saved one.
+fn choose_board_pat(input: Option<String>, stored: Option<String>) -> Result<String, String> {
+    input
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .or_else(|| {
+            stored
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+        })
+        .ok_or_else(|| "Enter your GitHub token to create the board.".to_string())
+}
+
+/// The git identity for the new board's commits: the form wins, otherwise the
+/// active project's, otherwise the user has to fill it in.
+fn choose_git_identity(
+    input_name: Option<String>,
+    input_email: Option<String>,
+    config: Option<&GitConfig>,
+) -> Result<(String, String), String> {
+    let pick = |input: Option<String>, saved: Option<&str>| {
+        input
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                saved
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
+    };
+    let name = pick(input_name, config.map(|c| c.git_user_name.as_str()))
+        .ok_or_else(|| "Enter the git user name for this board.".to_string())?;
+    let email = pick(input_email, config.map(|c| c.git_user_email.as_str()))
+        .ok_or_else(|| "Enter the git user email for this board.".to_string())?;
+    Ok((name, email))
+}
+
+/// The body of the create-repository call. It is its own function so the two
+/// promises that matter here — the board is **private**, and it carries an
+/// initial commit — are pinned by a test instead of only by a literal.
+fn board_create_body(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "private": true,
+        "auto_init": true,
+    })
+}
+
+/// Creates a private repository on GitHub and returns its clone url.
+///
+/// `auto_init` matters: an empty repository has no default branch, and the
+/// clone that follows could not check anything out of it.
+async fn github_create_repo(pat: &str, name: &str) -> Result<String, GithubError> {
+    let fatal = |message: String| GithubError {
+        retryable: false,
+        message,
+    };
+    let client = github_client().map_err(fatal)?;
+
+    let body = board_create_body(name).to_string();
+
+    let response = github_request(
+        &client,
+        reqwest::Method::POST,
+        "https://api.github.com/user/repos",
+        pat,
+    )
+    .body(body)
+    .send()
+    .await
+    .map_err(|e| fatal(format!("could not reach GitHub: {}", e)))?;
+
+    let status = response.status().as_u16();
+    let scopes = oauth_scopes(&response);
+    let text = response.text().await.unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            fatal(format!(
+                "GitHub created the repository but answered with something unreadable: {}",
+                e
+            ))
+        })?;
+        let clone_url = value
+            .get("clone_url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                fatal("GitHub created the repository but did not return a clone url.".to_string())
+            })?;
+        return Ok(clone_url.to_string());
+    }
+
+    Err(GithubError {
+        retryable: github_name_taken(status, &text),
+        message: github_api_error(status, scopes.as_deref(), &text),
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct BoardCreateInput {
+    /// Empty or absent falls back to `<project>-board`.
+    pub name: Option<String>,
+    /// Empty or absent falls back to the active project's saved token.
+    pub pat: Option<String>,
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+}
+
+/// Creates a board: a private repository on GitHub that holds only tickets, and
+/// links it as a project through the same path as any other repository.
+///
+/// Sharing a board is sharing that repository, which is why the application's
+/// own repository never participates: it stays a place for code.
+#[tauri::command]
+async fn board_create(input: BoardCreateInput) -> Result<Project, String> {
+    let config = read_git_config()?;
+    let pat = choose_board_pat(input.pat, load_pat().ok())?;
+    let (user_name, user_email) =
+        choose_git_identity(input.user_name, input.user_email, config.as_ref())?;
+
+    let base = match input.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(raw) => sanitize_board_name(raw),
+        None => default_board_name(
+            config
+                .as_ref()
+                .map(|c| extract_repo_name(&c.repo_url))
+                .as_deref(),
+        ),
+    };
+
+    let mut last_error = None;
+    let mut created_url = None;
+    for candidate in board_name_candidates(&base, 4) {
+        match github_create_repo(&pat, &candidate).await {
+            Ok(url) => {
+                created_url = Some(url);
+                break;
+            }
+            Err(e) if e.retryable => last_error = Some(e.message),
+            Err(e) => return Err(e.message),
+        }
+    }
+    let url = created_url.ok_or_else(|| {
+        last_error.unwrap_or_else(|| "could not create the board repository".to_string())
+    })?;
+
+    // The repository exists on GitHub from here on, so any later failure has to
+    // say so: otherwise the user is left with a repository nobody can find.
+    add_project(AddProjectInput {
+        url: url.clone(),
+        pat,
+        user_name,
+        user_email,
+    })
+    .await
+    .map_err(|e| {
+        format!(
+            "The board repository was created at {} but linking it failed: {}",
+            url, e
+        )
+    })
+}
+
+// ----- Invitation links -----
+
+/// Where an invitation points. Built on one side of the app and read on the
+/// other, so both halves of the format live here and a round trip pins them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct InviteDetails {
+    pub repo_url: String,
+    pub board: Option<String>,
+    pub from: Option<String>,
+}
+
+const INVITE_PREFIX: &str = "gitteam://join";
+
+/// A repository url as it may appear in an invitation. In an http(s) url the
+/// userinfo is a credential whatever it holds — a token is written as the user
+/// name — so it always goes. In any other scheme a plain user name is part of
+/// the address (`ssh://git@host`), but a password is a password, so `user:secret@`
+/// goes too. A scp-style `git@host:org/repo.git` has no userinfo section at all
+/// and is left untouched.
+fn invite_repo_url(repo_url: &str) -> String {
+    let trimmed = repo_url.trim();
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        return strip_userinfo(trimmed);
+    }
+    match trimmed.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('@') {
+            Some((userinfo, host)) if userinfo.contains(':') => format!("{}://{}", scheme, host),
+            _ => trimmed.to_string(),
+        },
+        None => trimmed.to_string(),
+    }
+}
+
+/// Percent-encoding for the query of an invitation. Everything that is not an
+/// unreserved character is escaped, so a space stays a `%20` and there is no
+/// room for the ambiguity of form encoding.
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &byte in input.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
+}
+
+/// The other half of `percent_encode`. A malformed escape is reported rather
+/// than guessed, and so is a sequence that is not valid UTF-8.
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .ok_or_else(|| "The invitation link ends in the middle of an escape.".to_string())?;
+            let value = std::str::from_utf8(hex)
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "The invitation link has an invalid escape: %{}.",
+                        String::from_utf8_lossy(hex)
+                    )
+                })?;
+            out.push(value);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "The invitation link is not valid UTF-8.".to_string())
+}
+
+/// The invitation for a board: the string the user copies and passes on.
+fn build_invite_link(repo_url: &str, board: &str, from: &str) -> String {
+    format!(
+        "{}?repo={}&board={}&from={}",
+        INVITE_PREFIX,
+        percent_encode(&invite_repo_url(repo_url)),
+        percent_encode(board),
+        percent_encode(from),
+    )
+}
+
+/// Reads a link that may have arrived through any messenger, with whatever
+/// whitespace that implies. Only the repository is required; the labels are
+/// there to show the user what they are about to open.
+fn parse_invite_link(text: &str) -> Result<InviteDetails, String> {
+    let missing_repo = || "The invitation is incomplete: it does not say which board it is for.";
+    let query = text
+        .trim()
+        .strip_prefix(INVITE_PREFIX)
+        .ok_or_else(|| {
+            "That is not a GitTeam invitation. A link looks like gitteam://join?repo=…".to_string()
+        })?
+        .strip_prefix('?')
+        .ok_or_else(missing_repo)?;
+
+    let mut repo_url = None;
+    let mut board = None;
+    let mut from = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = percent_decode(value)?.trim().to_string();
+        match key {
+            "repo" => repo_url = Some(value),
+            "board" => board = Some(value),
+            "from" => from = Some(value),
+            // Unknown parameters are ignored: a newer app may send more.
+            _ => {}
+        }
+    }
+
+    let repo_url = repo_url
+        .filter(|url| !url.is_empty())
+        .ok_or_else(missing_repo)?;
+
+    Ok(InviteDetails {
+        // Sanitised on the way in as well: a hand-edited link must not smuggle a
+        // credential into the clone that follows.
+        repo_url: invite_repo_url(&repo_url),
+        board: board.filter(|label| !label.is_empty()),
+        from: from.filter(|label| !label.is_empty()),
+    })
+}
+
+/// The invitation for the active board. It carries no credential: access is
+/// granted on GitHub, so a link that leaks grants nothing.
+#[tauri::command]
+fn board_invite_link() -> Result<String, String> {
+    let config = read_git_config()?
+        .ok_or_else(|| "There is no active board to invite anyone to.".to_string())?;
+    Ok(build_invite_link(
+        &config.repo_url,
+        &extract_repo_name(&config.repo_url),
+        &config.git_user_name,
+    ))
+}
+
+/// Reads a pasted invitation so the user can see what it points to before
+/// anything is cloned.
+#[tauri::command]
+fn board_parse_invite(text: String) -> Result<InviteDetails, String> {
+    parse_invite_link(&text)
+}
+
+/// Lo que trajo el esquema `gitteam://`, ya decidido: una invitación es lo único
+/// que abre la entrada a un board, y un link de GitTeam que no lo sea se
+/// contesta en pantalla en vez de desaparecer sin decir nada.
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct LinkIntake {
+    /// La primera invitación de la lista, para mostrarla antes de clonar.
+    pub invite: Option<String>,
+    /// El primer link de GitTeam que no era una invitación, cuando no hubo
+    /// ninguna: sirve para decir por qué no pasó nada.
+    pub not_an_invitation: Option<String>,
+}
+
+/// El sistema operativo entrega lo que el usuario clickeó, que puede no ser una
+/// invitación (`gitteam://` es nuestro y puede llevar otra cosa, o venir de una
+/// versión que no conocemos) y puede llegar repetido, vacío o con espacios. La
+/// decisión se toma una sola vez, acá, donde ya se sabe leer el formato: la UI
+/// no repite el parser ni inventa un segundo criterio.
+fn classify_received_links(urls: &[String]) -> LinkIntake {
+    let mut first_other = None;
+    for url in urls {
+        let url = url.trim();
+        if url.is_empty() {
+            continue;
+        }
+        // Una invitación gana sobre cualquier otro link, aparezca antes o
+        // después: es el único de los dos que hace algo, y con una en mano no
+        // queda nada que reprocharle a los demás. Por eso los dos campos nunca
+        // conviven.
+        if parse_invite_link(url).is_ok() {
+            return LinkIntake {
+                invite: Some(url.to_string()),
+                not_an_invitation: None,
+            };
+        }
+        if first_other.is_none() {
+            first_other = Some(url.to_string());
+        }
+    }
+    LinkIntake {
+        invite: None,
+        not_an_invitation: first_other,
+    }
+}
+
+/// Traduce los links con los que el sistema abrió (o despertó) la app. El
+/// frontend llama a esto con lo que recibe del plugin de deep links, que en
+/// Linux incluye el argumento con el que se lanzó la primera instancia.
+#[tauri::command]
+fn gitteam_link_intake(urls: Vec<String>) -> LinkIntake {
+    classify_received_links(&urls)
+}
+
+// ----- Compartir un board: el acceso lo otorga el dueño, por @usuario -----
+
+/// One place for the HTTP client GitHub's calls share, so the timeout is
+/// decided once instead of in every call.
+fn github_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("could not start the HTTP client: {}", e))
+}
+
+/// The headers every GitHub call carries, as data rather than as a chain of
+/// calls, so the contract can be pinned by a test.
+fn github_headers(pat: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("Authorization", format!("Bearer {}", pat)),
+        ("Accept", "application/vnd.github+json".to_string()),
+        ("X-GitHub-Api-Version", "2022-11-28".to_string()),
+        ("User-Agent", "gitteam".to_string()),
+    ]
+}
+
+fn github_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    pat: &str,
+) -> reqwest::RequestBuilder {
+    let mut request = client.request(method, url);
+    for (name, value) in github_headers(pat) {
+        request = request.header(name, value);
+    }
+    request
+}
+
+/// The scopes GitHub reports on a response, when it reports them: fine-grained
+/// tokens say nothing, which is why their absence proves nothing.
+fn oauth_scopes(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get("x-oauth-scopes")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string())
+}
+
+/// A GitHub user name as the person typed or pasted it, normalized, and refused
+/// with a reason when GitHub could not have it. Saying why here beats spending a
+/// call to be told.
+fn normalize_github_username(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_start_matches('@').trim();
+    if trimmed.is_empty() {
+        return Err("Enter the GitHub user name to invite.".to_string());
+    }
+    if trimmed.len() > 39 {
+        return Err("A GitHub user name has at most 39 characters.".to_string());
+    }
+    if trimmed.starts_with('-') || trimmed.ends_with('-') || trimmed.contains("--") {
+        return Err(format!(
+            "@{} is not a GitHub user name: it cannot begin or end with a hyphen, or repeat one.",
+            trimmed
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(format!(
+            "@{} is not a GitHub user name: only letters, digits and hyphens.",
+            trimmed
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// The full name `owner/repo` of a GitHub remote, which is how the API names it.
+/// `None` when the remote is not on GitHub: granting access by user name is a
+/// GitHub operation, and elsewhere there is nothing to ask.
+fn repo_full_name(repo_url: &str) -> Option<String> {
+    let trimmed = repo_url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("ssh://"))
+        .or_else(|| trimmed.strip_prefix("git@"))
+        .unwrap_or(trimmed);
+
+    // The scp form has no scheme and separates host from path with a colon.
+    let (authority, path) = match without_scheme.split_once(':') {
+        Some((authority, path)) if !trimmed.contains("://") => (authority, path),
+        _ => without_scheme.split_once('/')?,
+    };
+
+    // A remote that kept a credential carries it in the authority, and a host can
+    // come with a port: the repository's name needs neither.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+
+    // A url pasted by hand can carry a query or a fragment: neither is part of
+    // the name, and leaving them in would ask GitHub about a repository that
+    // does not exist.
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let path = path.trim_start_matches('/').trim_end_matches(".git");
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    Some(format!("{}/{}", owner, name))
+}
+
+/// The body of the add-collaborator call: write access, which is what working on
+/// a board needs. Its own function so the promise is pinned by a test.
+fn collaborator_invite_body() -> serde_json::Value {
+    serde_json::json!({ "permission": "push" })
+}
+
+/// What to say when the call succeeded. GitHub answers 201 when it created an
+/// invitation and 204 when the user was already a collaborator: two different
+/// situations for whoever is looking at the screen.
+fn collaborator_result_message(status: u16, username: &str) -> String {
+    if status == 201 {
+        format!(
+            "Invitation sent to @{}: they have to accept it on GitHub before the clone works.",
+            username
+        )
+    } else {
+        format!("@{} already has access to this board.", username)
+    }
+}
+
+/// The error of the add-collaborator call, with the one case that has a name of
+/// its own: a user GitHub does not have. Everything else is explained by the
+/// general mapping, which reads the body.
+fn collaborator_error_message(
+    status: u16,
+    oauth_scopes: Option<&str>,
+    body: &str,
+    username: &str,
+) -> String {
+    match status {
+        404 => format!(
+            "GitHub has no user called @{}. Check the spelling of their user name.",
+            username
+        ),
+        403 => {
+            // The general mapping explains a 403 in terms of creating a
+            // repository, which is not what this call does. Two refusals are
+            // worth naming, and what the token reports is what tells them apart:
+            // a classic token without the `repo` scope, and an account that is
+            // simply not the one that manages this repository. A token that
+            // reports no scopes is the second case, not the first: fine-grained
+            // tokens report nothing, so "none" must not be read as "missing".
+            let scopes = oauth_scopes.unwrap_or("").trim();
+            let has_repo_scope = scopes.split(',').any(|s| s.trim() == "repo");
+            let need = if !scopes.is_empty() && !has_repo_scope {
+                "The token is missing the `repo` scope, which granting access needs."
+            } else {
+                "Only a token that can manage this repository may grant access: the one in use belongs to another account, or lacks permission to manage it."
+            };
+            format!(
+                "GitHub refused to give @{} access to this board. {} (Scopes it has: {}.)",
+                username,
+                need,
+                if scopes.is_empty() { "none reported" } else { scopes }
+            )
+        }
+        _ => github_api_error(status, oauth_scopes, body),
+    }
+}
+
+/// An invitation waiting on the invitee's side.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PendingInvitation {
+    pub id: u64,
+    /// The full name `owner/repo`, which is how GitHub names it.
+    pub repo: String,
+    /// Who sent it, when GitHub says.
+    pub from: Option<String>,
+}
+
+/// Reads what GitHub answers on `GET /user/repository_invitations`. An
+/// invitation without a repository cannot be used for anything, so it is not
+/// turned into something half-formed: it is reported.
+fn pending_invitations_from_json(body: &str) -> Result<Vec<PendingInvitation>, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("GitHub answered with something unreadable: {}", e))?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "GitHub did not answer with a list of invitations.".to_string())?;
+
+    let mut invitations = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "An invitation from GitHub came without an identifier.".to_string())?;
+        let repo = item
+            .get("repository")
+            .and_then(|v| v.get("full_name"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "An invitation from GitHub came without a repository.".to_string())?;
+        let from = item
+            .get("inviter")
+            .and_then(|v| v.get("login"))
+            .and_then(|v| v.as_str())
+            .map(|login| login.to_string());
+        invitations.push(PendingInvitation {
+            id,
+            repo: repo.to_string(),
+            from,
+        });
+    }
+    Ok(invitations)
+}
+
+/// The invitation that belongs to this board, if it is among the pending ones.
+/// GitHub does not distinguish case in repository names.
+fn invitation_for_repo<'a>(
+    invitations: &'a [PendingInvitation],
+    repo: &str,
+) -> Option<&'a PendingInvitation> {
+    invitations
+        .iter()
+        .find(|invitation| invitation.repo.eq_ignore_ascii_case(repo))
+}
+
+/// Gives a GitHub user access to the board, by their user name (S5). It is the
+/// owner's action: the credential is the active project's, and the invitation
+/// stays pending until the other person accepts it.
+#[tauri::command]
+async fn board_invite_collaborator(username: String) -> Result<String, String> {
+    let config = read_git_config()?
+        .ok_or_else(|| "There is no active board to invite anyone to.".to_string())?;
+    let repo = repo_full_name(&config.repo_url).ok_or_else(|| {
+        "This board's repository is not on GitHub, so its access cannot be granted from here."
+            .to_string()
+    })?;
+    let username = normalize_github_username(&username)?;
+    let pat = choose_board_pat(None, load_pat().ok()).map_err(|_| {
+        "This board has no saved GitHub token, so access cannot be granted from here.".to_string()
+    })?;
+
+    let client = github_client()?;
+    let response = github_request(
+        &client,
+        reqwest::Method::PUT,
+        &format!(
+            "https://api.github.com/repos/{}/collaborators/{}",
+            repo, username
+        ),
+        &pat,
+    )
+    .body(collaborator_invite_body().to_string())
+    .send()
+    .await
+    .map_err(|e| format!("Could not reach GitHub: {}", e))?;
+
+    let status = response.status().as_u16();
+    let scopes = oauth_scopes(&response);
+    let text = response.text().await.unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        return Ok(collaborator_result_message(status, &username));
+    }
+    Err(collaborator_error_message(
+        status,
+        scopes.as_deref(),
+        &text,
+        &username,
+    ))
+}
+
+/// The invitations GitHub has pending for whoever owns this credential. The
+/// invitee looks them up with **their** token: the invitation is on their
+/// account (S5). With a repository url, only the invitation for that board comes
+/// back: joining a board does not need the rest of the list.
+#[tauri::command]
+async fn github_pending_invitations(
+    pat: String,
+    repo_url: Option<String>,
+) -> Result<Vec<PendingInvitation>, String> {
+    let pat = pat.trim().to_string();
+    if pat.is_empty() {
+        return Err("Your GitHub token is needed to look up your invitations.".to_string());
+    }
+
+    let client = github_client()?;
+    let response = github_request(
+        &client,
+        reqwest::Method::GET,
+        "https://api.github.com/user/repository_invitations",
+        &pat,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Could not reach GitHub: {}", e))?;
+
+    let status = response.status().as_u16();
+    let scopes = oauth_scopes(&response);
+    let text = response.text().await.unwrap_or_default();
+
+    if !(200..300).contains(&status) {
+        return Err(github_api_error(status, scopes.as_deref(), &text));
+    }
+
+    let invitations = pending_invitations_from_json(&text)?;
+    match repo_url.as_deref().map(repo_full_name) {
+        Some(Some(repo)) => Ok(invitation_for_repo(&invitations, &repo)
+            .cloned()
+            .into_iter()
+            .collect()),
+        Some(None) => Err(
+            "This board's repository is not on GitHub, so there is no invitation to look for."
+                .to_string(),
+        ),
+        None => Ok(invitations),
+    }
+}
+
+/// Accepts a pending invitation. Without this, accepting depends on the mail
+/// GitHub sends, and the flow should not depend on a mail (S5).
+#[tauri::command]
+async fn github_accept_invitation(pat: String, invitation_id: u64) -> Result<(), String> {
+    let pat = pat.trim().to_string();
+    if pat.is_empty() {
+        return Err("Your GitHub token is needed to accept an invitation.".to_string());
+    }
+
+    let client = github_client()?;
+    let response = github_request(
+        &client,
+        reqwest::Method::PATCH,
+        &format!(
+            "https://api.github.com/user/repository_invitations/{}",
+            invitation_id
+        ),
+        &pat,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Could not reach GitHub: {}", e))?;
+
+    let status = response.status().as_u16();
+    let scopes = oauth_scopes(&response);
+    let text = response.text().await.unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    Err(github_api_error(status, scopes.as_deref(), &text))
+}
+
 #[tauri::command]
 fn remove_project(project_id: String) -> Result<(), String> {
     let was_active = read_active_id()?.as_deref() == Some(project_id.as_str());
@@ -2733,10 +3778,35 @@ fn switch_project(project_id: String) -> Result<Project, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // El primero de todos: en Linux y Windows el sistema no le entrega el
+        // link a la app que ya está abierta, lanza una segunda instancia con la
+        // url como argumento. Este plugin la detecta, le pasa ese argumento al
+        // plugin de deep links (feature `deep-link`) y la cierra, así que el
+        // click termina en la ventana que ya existe y no en una copia nueva.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // En un paquete el esquema lo declara el instalador; acá se registra
+            // además a mano porque `tauri dev` corre sin instalar nada, y sin
+            // registro el sistema nunca entrega el link. Es idempotente y el
+            // plugin corrige el `Exec` si el binario se movió. Un fallo acá no
+            // puede impedir que la app abra.
+            #[cfg(target_os = "linux")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register_all();
+            }
+            Ok(())
+        })
         .manage(WatcherState::default())
         .invoke_handler(tauri::generate_handler![
             init_data_dir,
@@ -2768,6 +3838,14 @@ pub fn run() {
             list_projects,
             get_active_project,
             add_project,
+            board_create,
+            board_invite_link,
+            board_parse_invite,
+            // Deep link (T6)
+            gitteam_link_intake,
+            board_invite_collaborator,
+            github_pending_invitations,
+            github_accept_invitation,
             remove_project,
             switch_project,
             // Graph (Fase 6F)
@@ -3894,5 +4972,1147 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_credential_override_skips_remotes_that_carry_no_credential() {
+        // A local board is supported, and a plain path is how this very suite
+        // talks to its remotes: rewriting one would turn it into a broken url.
+        assert!(credentialed_remote_override("/tmp/board.git", "tok").is_empty());
+        assert!(credentialed_remote_override("file:///tmp/board.git", "tok").is_empty());
+        assert!(credentialed_remote_override("ssh://git@github.com/a/b.git", "tok").is_empty());
+    }
+
+    #[test]
+    fn the_credential_override_matches_the_clean_url_and_never_the_token() {
+        let clean = "https://github.com/astivens/board.git";
+        let args = credentialed_remote_override(clean, "tok");
+        assert_eq!(args[0], "-c");
+        let rest = args[1]
+            .strip_prefix("url.")
+            .expect("the override must be a url.* config");
+        let (target, matched) = rest
+            .split_once(".insteadOf=")
+            .expect("the override must be an insteadOf rule");
+        // git substitutes `target` for `matched`: the credential is what reaches
+        // the network, and the credential-free url is what gets replaced.
+        assert!(target.contains("tok@"), "target: {}", target);
+        assert_eq!(matched, clean);
+    }
+
+    #[test]
+    fn git_reads_the_stored_remote_through_the_credential_override() {
+        // The mechanism this fix rests on: the stored remote stays clean and a
+        // single command reaches the credentialed url without writing anything.
+        // Real git, no network.
+        let dir = unique_temp_dir("cred-override");
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        let clean = "https://github.com/astivens/board.git";
+        git_in(&dir, &["remote", "add", "origin", clean]);
+
+        let plain = git_out(&dir, &["remote", "get-url", "origin"]);
+        assert_eq!(
+            String::from_utf8_lossy(&plain.stdout).trim(),
+            clean,
+            "the stored url must stay credential-free"
+        );
+
+        let override_args = credentialed_remote_override(clean, "tok");
+        let mut args: Vec<&str> = override_args.iter().map(|s| s.as_str()).collect();
+        args.extend_from_slice(&["remote", "get-url", "origin"]);
+        let credentialed = git_out(&dir, &args);
+        let out = String::from_utf8_lossy(&credentialed.stdout);
+        assert!(
+            out.contains("tok@"),
+            "with the override git must resolve the credentialed url, got: {}",
+            out
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_credential_left_in_the_stored_remote_url_is_removed() {
+        let dir = unique_temp_dir("cred-repair");
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        git_in(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://x-access-token:secret@github.com/astivens/board.git",
+            ],
+        );
+
+        assert!(
+            strip_stored_userinfo(&dir),
+            "a stored credential must be reported as rewritten"
+        );
+        let repaired = git_out(&dir, &["remote", "get-url", "origin"]);
+        assert_eq!(
+            String::from_utf8_lossy(&repaired.stdout).trim(),
+            "https://github.com/astivens/board.git"
+        );
+        assert!(
+            !strip_stored_userinfo(&dir),
+            "a clean remote must be left untouched"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    // S1 — real git: the clone argument reaches `.git/config`, never the
+    // substitution target, and the one-command rule is not persisted.
+    fn a_clone_through_the_override_stores_no_credential() {
+        let root = unique_temp_dir("clone-override");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let remote = root.join("remote.git");
+        git_in(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
+        let seed = root.join("seed");
+        git_in(
+            &root,
+            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+        );
+        fs::write(seed.join("README.md"), "board\n").unwrap();
+        git_in(&seed, &["add", "README.md"]);
+        git_in(&seed, &["commit", "-q", "-m", "init"]);
+        git_in(&seed, &["push", "-q", "origin", "HEAD"]);
+
+        let clean = "https://github.com/astivens/board.git";
+        for (name, redirect) in [
+            ("path", format!("url.{}.insteadOf={}", remote.display(), clean)),
+            (
+                "userinfo",
+                format!("url.file://x:tok@{}.insteadOf={}", remote.display(), clean),
+            ),
+        ] {
+            let dst = root.join(name);
+            git_in(
+                &root,
+                &["-c", &redirect, "clone", "-q", clean, dst.to_str().unwrap()],
+            );
+            let stored = git_out(&dst, &["remote", "get-url", "origin"]);
+            assert_eq!(
+                String::from_utf8_lossy(&stored.stdout).trim(),
+                clean,
+                "{}",
+                name
+            );
+            let config = fs::read_to_string(dst.join(".git/config")).unwrap();
+            assert!(
+                !config.contains("insteadOf"),
+                "the rule must not be persisted: {}",
+                config
+            );
+            assert!(
+                !config.contains("tok"),
+                "{} leaked a credential: {}",
+                name,
+                config
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    // S6 — a message never hands the token back. The shapes are the ones git,
+    // curl and the credential override actually produce.
+    fn redact_credentials_takes_the_credential_out_of_the_shapes_it_travels_in() {
+        let cases = [
+            (
+                "the password form github uses",
+                "fatal: unable to access 'https://x-access-token:ghp_secret@github.com/a/b.git/': The requested URL returned error: 403",
+                "fatal: unable to access 'https://***@github.com/a/b.git/': The requested URL returned error: 403",
+            ),
+            (
+                "the token-as-user form any other host gets",
+                "fatal: could not read from 'https://ghp_secret@gitea.example.com/a/b.git/'",
+                "fatal: could not read from 'https://***@gitea.example.com/a/b.git/'",
+            ),
+            (
+                "the override key run_git_with_credential prepends",
+                "-c url.https://x-access-token:ghp_secret@github.com/.insteadOf=https://github.com/ clone --no-progress",
+                "-c url.https://***@github.com/.insteadOf=https://github.com/ clone --no-progress",
+            ),
+            (
+                "a url that carries nothing, path included",
+                "git fetch failed (exit 128): fatal: could not read Username for 'https://github.com/a/b.git'",
+                "git fetch failed (exit 128): fatal: could not read Username for 'https://github.com/a/b.git'",
+            ),
+            (
+                "an ssh url, where git@ is addressing and not a secret",
+                "fatal: could not read from 'ssh://git@github.com/a/b.git'",
+                "fatal: could not read from 'ssh://git@github.com/a/b.git'",
+            ),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(redact_credentials(input), expected, "{}", name);
+        }
+    }
+
+    #[tokio::test]
+    // S6 — the whole path, not just the string: the credential belongs to the
+    // arguments `run_git_with_credential` builds, so a failure there reached the
+    // user with the token in it.
+    async fn a_failed_command_does_not_report_the_credential_it_was_given() {
+        let dir = unique_temp_dir("credential-in-error");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // `rev-parse` fails in a directory that is not a repository, with no
+        // network and no project involved: the credential is in argv and the
+        // command still fails deterministically.
+        let err = run_git_with_credential(
+            &dir,
+            "https://github.com/astivens/board.git",
+            "ghp_secret",
+            &["rev-parse", "HEAD"],
+            10,
+            None,
+        )
+        .await
+        .expect_err("a directory that is not a repository must fail");
+        assert!(
+            !err.contains("ghp_secret"),
+            "the token came back to the caller: {}",
+            err
+        );
+        assert!(
+            err.contains("***@github.com"),
+            "the arguments are still reported, redacted: {}",
+            err
+        );
+        assert!(
+            err.contains("fatal:"),
+            "and so is what git said: {}",
+            err
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    // S6 — the property on the connect form's own path: git anonymises the
+    // userinfo of the url it prints, and this keeps it that way whichever way the
+    // probe fails. It passes without the redactor too — that is the finding, and
+    // it is recorded in the log: the reproducible leak was our own arguments,
+    // which the test above pins. Port 1 on loopback refuses at once, so this needs
+    // neither DNS nor an outside network.
+    async fn the_connection_test_does_not_report_the_credential_it_was_given() {
+        let result = git_test_connection_inner("https://127.0.0.1:1/board.git", "ghp_secret")
+            .await
+            .expect("this probe reports failures in its result, it does not return Err");
+        let error = result.error.expect("port 1 refuses the connection");
+        assert!(!result.ok, "the probe must be reported as failed");
+        assert!(
+            !error.contains("ghp_secret"),
+            "the token came back to the connect form: {}",
+            error
+        );
+    }
+
+    #[test]
+    // S6 — the credential lives in the keyring, so it does not go into the file
+    // either: a url pasted with its token in it is stored without one.
+    fn a_credential_in_the_configured_url_is_not_written_to_the_config() {
+        let config = GitConfig {
+            repo_url: "https://x-access-token:ghp_secret@github.com/astivens/board.git".to_string(),
+            git_user_name: "Ada".to_string(),
+            git_user_email: "ada@example.com".to_string(),
+            last_sync_at: Some("2026-10-19T00:00:00Z".to_string()),
+        };
+
+        let stored = config_to_persist(&config);
+        assert_eq!(
+            stored.repo_url, "https://github.com/astivens/board.git",
+            "the url is stored clean"
+        );
+        assert_eq!(stored.git_user_name, "Ada");
+        assert_eq!(stored.git_user_email, "ada@example.com");
+        assert_eq!(stored.last_sync_at.as_deref(), Some("2026-10-19T00:00:00Z"));
+
+        let json = serde_json::to_string_pretty(&stored).unwrap();
+        assert!(
+            !json.contains("ghp_secret"),
+            "the file would carry the token: {}",
+            json
+        );
+
+        let clean = GitConfig {
+            repo_url: "https://github.com/astivens/board.git".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(
+            config_to_persist(&clean).repo_url,
+            "https://github.com/astivens/board.git",
+            "a url that never carried a credential is written as it came"
+        );
+    }
+
+    #[test]
+    // S6 — an uppercase scheme used to be left in place, so the credentialed url
+    // came out double-wrapped and the token sat behind the `/` that closes the
+    // authority the redactor scans. It is normalised before the token goes in.
+    fn a_url_pasted_with_an_uppercase_scheme_is_not_double_wrapped() {
+        let authenticated = with_authenticated_url("HTTPS://github.com/astivens/board.git", "ghp_s");
+        assert_eq!(
+            authenticated, "https://x-access-token:ghp_s@github.com/astivens/board.git",
+            "one scheme, and the host is the one that was pasted"
+        );
+        assert_eq!(
+            authenticated.matches("https://").count(),
+            1,
+            "the url is not wrapped twice: {}",
+            authenticated
+        );
+        assert_eq!(
+            strip_userinfo(&authenticated),
+            "https://github.com/astivens/board.git",
+            "and what gets stored carries no credential"
+        );
+    }
+
+    #[test]
+    // S6 — the redaction applied to a command's stderr is defence in depth, and
+    // this pins the measurement it rests on: git strips the userinfo before it
+    // prints a url, so on every shape it produces the redactor is an identity.
+    // Offline: port 1 refuses the connection at once.
+    fn git_anonymises_the_url_it_prints_so_the_redactor_is_a_no_op_on_it() {
+        for url in [
+            "https://x-access-token:ghp_s@127.0.0.1:1/board.git",
+            "https://ghp_s@127.0.0.1:1/board.git",
+        ] {
+            let out = std::process::Command::new("git")
+                .args(["ls-remote", url, "HEAD"])
+                .output()
+                .expect("git could not be started");
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(!out.status.success(), "the probe must fail: {}", stderr);
+            assert!(
+                !stderr.contains("ghp_s"),
+                "git printed the credential: {}",
+                stderr
+            );
+            assert_eq!(
+                redact_credentials(&stderr),
+                stderr,
+                "nothing left for the redactor to do"
+            );
+        }
+    }
+
+    #[test]
+    // S3 — the repair is a no-op for remotes that carry no credential in their
+    // userinfo, and for an SSH url where `git@host` is addressing, not a secret.
+    fn strip_stored_userinfo_leaves_non_http_remotes_alone() {
+        for (name, url) in [
+            ("path", "/tmp/plain-board.git"),
+            ("file", "file:///tmp/plain-board.git"),
+            ("ssh", "ssh://git@github.com/a/b.git"),
+        ] {
+            let dir = unique_temp_dir(&format!("keep-{}", name));
+            fs::create_dir_all(&dir).unwrap();
+            git_in(&dir, &["init", "-q"]);
+            git_in(&dir, &["remote", "add", "origin", url]);
+            assert!(!strip_stored_userinfo(&dir), "{} must not be rewritten", url);
+            let after = git_out(&dir, &["remote", "get-url", "origin"]);
+            assert_eq!(String::from_utf8_lossy(&after.stdout).trim(), url);
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    // S4 — a sync must never fail because there is nothing to repair.
+    fn strip_stored_userinfo_is_a_noop_without_an_origin() {
+        let dir = unique_temp_dir("cred-no-origin");
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        assert!(!strip_stored_userinfo(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    // S5 — only the commands that talk to the remote pay for a credential.
+    fn only_the_network_commands_pay_for_a_credential() {
+        for a in ["fetch", "pull", "push", "ls-remote", "clone"] {
+            assert!(needs_credential(&[a]), "{}", a);
+        }
+        for a in [
+            "status",
+            "log",
+            "merge",
+            "config",
+            "checkout",
+            "add",
+            "diff",
+            "show",
+            "rebase",
+            "reset",
+            "rev-parse",
+            "remote",
+        ] {
+            assert!(!needs_credential(&[a]), "{}", a);
+        }
+    }
+
+    #[test]
+    // S2 — the injected rule reaches the remote for fetch and push (real git,
+    // offline: a local bare repository stands in for the network).
+    fn the_override_reaches_the_remote_for_fetch_and_push() {
+        let root = unique_temp_dir("override-network");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let remote = root.join("remote.git");
+        git_in(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
+        let seed = root.join("seed");
+        git_in(
+            &root,
+            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+        );
+        fs::write(seed.join("README.md"), "board\n").unwrap();
+        git_in(&seed, &["add", "README.md"]);
+        git_in(&seed, &["commit", "-q", "-m", "init"]);
+        git_in(&seed, &["push", "-q", "origin", "HEAD"]);
+
+        let clean = "https://github.com/astivens/board.git";
+        let redirect = format!("url.{}.insteadOf={}", remote.display(), clean);
+        let work = root.join("work");
+        git_in(
+            &root,
+            &["-c", &redirect, "clone", "-q", clean, work.to_str().unwrap()],
+        );
+        git_in(&work, &["-c", &redirect, "fetch", "-q", "origin"]);
+        fs::write(work.join("TKT-1000-a.md"), "---\nid: TKT-1000\n---\n\nx\n").unwrap();
+        git_in(&work, &["add", "-A"]);
+        git_in(&work, &["commit", "-q", "-m", "ticket"]);
+        git_in(&work, &["-c", &redirect, "push", "-q", "origin", "HEAD"]);
+
+        let pushed = git_out(&remote, &["rev-parse", "HEAD"]);
+        let local = git_out(&work, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            String::from_utf8_lossy(&pushed.stdout),
+            String::from_utf8_lossy(&local.stdout),
+            "the push must have reached the remote through the override"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sanitize_board_name_folds_what_a_repository_name_cannot_hold() {
+        assert_eq!(sanitize_board_name("Royero Labs"), "royero-labs");
+        assert_eq!(sanitize_board_name("  board!!  "), "board");
+        assert_eq!(sanitize_board_name("a/b"), "a-b");
+        assert_eq!(sanitize_board_name("keep_this.one"), "keep_this.one");
+        assert_eq!(sanitize_board_name("-already-"), "already");
+        assert_eq!(sanitize_board_name("a   b"), "a-b");
+        assert_eq!(sanitize_board_name("!!!"), "board");
+        assert_eq!(sanitize_board_name(""), "board");
+    }
+
+    #[test]
+    fn default_board_name_prefers_the_project_it_belongs_to() {
+        assert_eq!(default_board_name(Some("royero-labs")), "royero-labs-board");
+        assert_eq!(default_board_name(Some("Royero Labs")), "royero-labs-board");
+        assert_eq!(default_board_name(Some("   ")), "gitteam-board");
+        assert_eq!(default_board_name(None), "gitteam-board");
+    }
+
+    #[test]
+    fn board_name_candidates_offer_numbered_fallbacks() {
+        assert_eq!(
+            board_name_candidates("royero-board", 3),
+            vec!["royero-board", "royero-board-2", "royero-board-3"]
+        );
+        assert_eq!(board_name_candidates("b", 1), vec!["b"]);
+    }
+
+    #[test]
+    fn a_taken_name_is_the_only_retryable_create_failure() {
+        assert!(github_name_taken(
+            422,
+            r#"{"message":"Repository creation failed.","errors":[{"message":"name already exists on this account"}]}"#
+        ));
+        assert!(!github_name_taken(422, r#"{"message":"Validation Failed"}"#));
+        assert!(!github_name_taken(
+            403,
+            r#"{"message":"name already exists on this account"}"#
+        ));
+    }
+
+    #[test]
+    fn a_token_without_the_repo_scope_says_so_instead_of_a_bare_403() {
+        // GitHub answers 403 (or a deliberately vague 404) when the scope is
+        // missing, and never says which scope: the header is the only source.
+        let missing = github_api_error(403, Some("public_repo, workflow"), "{}");
+        assert!(missing.contains("`repo`"), "{}", missing);
+        assert!(missing.contains("public_repo, workflow"), "{}", missing);
+
+        let hidden = github_api_error(404, Some(""), "{}");
+        assert!(hidden.contains("`repo`"), "{}", hidden);
+        assert!(hidden.contains("none"), "{}", hidden);
+
+        // A 401 is about the token itself, not about a scope.
+        let invalid = github_api_error(401, None, "{}");
+        assert!(invalid.contains("expired"), "{}", invalid);
+
+        // Scope present: the 403 is a plain permission problem.
+        let refused = github_api_error(403, Some("repo, workflow"), "{}");
+        assert!(!refused.contains("missing"), "{}", refused);
+        assert!(refused.contains("permissions"), "{}", refused);
+    }
+
+    #[test]
+    fn a_github_error_prefers_the_specific_message() {
+        let body = r#"{"message":"Validation Failed","errors":[{"message":"name already exists on this account"}]}"#;
+        let message = github_api_error(422, Some("repo"), body);
+        assert!(
+            message.contains("name already exists on this account"),
+            "{}",
+            message
+        );
+
+        // A body that is not JSON must not derail the message.
+        let raw = github_api_error(500, None, "  boom\n\n");
+        assert!(raw.contains("500") && raw.contains("boom"), "{}", raw);
+
+        // Nor one that is empty.
+        let empty = github_api_error(500, None, "");
+        assert!(empty.contains("500"), "{}", empty);
+    }
+
+    #[test]
+    fn the_board_credential_comes_from_the_form_or_the_saved_project() {
+        assert_eq!(
+            choose_board_pat(Some("  typed  ".to_string()), Some("saved".to_string())).unwrap(),
+            "typed"
+        );
+        assert_eq!(
+            choose_board_pat(None, Some("saved".to_string())).unwrap(),
+            "saved"
+        );
+        assert_eq!(
+            choose_board_pat(Some("   ".to_string()), Some("saved".to_string())).unwrap(),
+            "saved"
+        );
+        assert!(choose_board_pat(None, None).is_err());
+    }
+
+    #[test]
+    fn the_board_git_identity_comes_from_the_form_or_the_saved_project() {
+        let config = GitConfig {
+            repo_url: "https://github.com/a/b.git".to_string(),
+            git_user_name: "Saved Name".to_string(),
+            git_user_email: "saved@example.com".to_string(),
+            last_sync_at: None,
+        };
+        assert_eq!(
+            choose_git_identity(None, None, Some(&config)).unwrap(),
+            ("Saved Name".to_string(), "saved@example.com".to_string())
+        );
+        assert_eq!(
+            choose_git_identity(
+                Some("Typed".to_string()),
+                Some("typed@example.com".to_string()),
+                Some(&config)
+            )
+            .unwrap(),
+            ("Typed".to_string(), "typed@example.com".to_string())
+        );
+        assert!(choose_git_identity(None, None, None).is_err());
+    }
+
+    #[test]
+    fn a_board_is_created_private_and_with_an_initial_commit() {
+        let body = board_create_body("royero-labs-board");
+        assert_eq!(body["name"], "royero-labs-board");
+        assert_eq!(
+            body["private"], true,
+            "a board is private unless the user decides otherwise"
+        );
+        assert_eq!(
+            body["auto_init"], true,
+            "an empty repository has no branch for the clone to check out"
+        );
+    }
+
+    #[test]
+    fn a_missing_scope_header_is_still_reported_as_a_missing_repo_scope() {
+        // The header is absent for fine-grained tokens, so its absence must
+        // still lead with the scope problem instead of a bare 403.
+        let absent = github_api_error(403, None, "{}");
+        assert!(absent.contains("`repo`"), "{}", absent);
+        assert!(absent.contains("none"), "{}", absent);
+
+        // With the scope present there is no scope story to tell.
+        let present = github_api_error(404, Some("repo"), "{}");
+        assert!(!present.contains("missing"), "{}", present);
+    }
+
+    #[test]
+    fn the_repo_scope_is_an_exact_list_member() {
+        // A scope that merely contains "repo" is not the scope.
+        for value in ["repo", "repo,workflow", "workflow, repo ", "public_repo,repo"] {
+            let message = github_api_error(403, Some(value), "{}");
+            assert!(message.contains("permissions"), "{:?} -> {}", value, message);
+        }
+        for value in ["repo_deployment", "public_repo", "repo:status"] {
+            let message = github_api_error(403, Some(value), "{}");
+            assert!(message.contains("missing"), "{:?} -> {}", value, message);
+        }
+    }
+
+    #[test]
+    fn the_candidate_list_always_offers_the_base_name() {
+        assert_eq!(board_name_candidates("b", 0), vec!["b"]);
+        assert_eq!(board_name_candidates("b", 2).len(), 2);
+    }
+
+    #[test]
+    fn an_invitation_link_round_trips_through_its_own_parser() {
+        let link = build_invite_link(
+            "https://github.com/astivens/royero-labs-board.git",
+            "royero-labs-board",
+            "Ana Dev",
+        );
+        assert_eq!(
+            link,
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fastivens%2Froyero-labs-board.git&board=royero-labs-board&from=Ana%20Dev"
+        );
+
+        let parsed = parse_invite_link(&link).expect("the link we build must parse");
+        assert_eq!(
+            parsed.repo_url,
+            "https://github.com/astivens/royero-labs-board.git"
+        );
+        assert_eq!(parsed.board.as_deref(), Some("royero-labs-board"));
+        assert_eq!(parsed.from.as_deref(), Some("Ana Dev"));
+    }
+
+    #[test]
+    fn a_pasted_link_tolerates_whitespace_and_missing_labels() {
+        // The same string is copied as text, so it arrives with whatever the
+        // messenger added around it, and an older link may carry no labels.
+        let parsed = parse_invite_link(
+            "  gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git  ",
+        )
+        .expect("a link carrying only a repository must parse");
+        assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
+        assert_eq!(parsed.board, None);
+        assert_eq!(parsed.from, None);
+    }
+
+    #[test]
+    fn a_link_that_is_not_an_invitation_is_rejected_with_a_reason() {
+        for text in [
+            "",
+            "   ",
+            "https://github.com/a/b.git",
+            "gitteam://other?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git",
+            "gitteam://join",
+            "gitteam://join?",
+            "gitteam://join&repo=x",
+            "gitteam://join?repo",
+            "gitteam://join?board=only-a-label",
+        ] {
+            let error = parse_invite_link(text).expect_err("must be rejected");
+            assert!(!error.trim().is_empty(), "{:?} produced no reason", text);
+        }
+    }
+
+    #[test]
+    fn a_parameter_a_newer_app_sends_is_ignored_rather_than_fatal() {
+        let parsed = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&scope=board%2Fread",
+        )
+        .expect("an unknown parameter must not break the parse");
+        assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
+    }
+
+    #[test]
+    fn an_invitation_never_carries_a_credential_in_either_direction() {
+        // Writing: a stored remote that somehow kept its token must not leak it
+        // into a string the user is about to pass around.
+        let link = build_invite_link("https://ghp_secret@github.com/a/b.git", "b", "Ana");
+        assert!(!link.contains("ghp_secret"), "{}", link);
+        assert!(link.contains("github.com%2Fa%2Fb.git"), "{}", link);
+
+        // Reading: a hand-edited link must not hand a credential to the clone.
+        let parsed = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fghp_secret%40github.com%2Fa%2Fb.git",
+        )
+        .expect("the link is well formed");
+        assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
+    }
+
+    #[test]
+    fn a_password_is_stripped_in_any_scheme_but_a_user_name_is_not() {
+        // `ssh://git@host` is an address; `ssh://user:secret@host` carries one.
+        assert_eq!(
+            invite_repo_url("ssh://user:ghp_secret@github.com/a/b.git"),
+            "ssh://github.com/a/b.git"
+        );
+        assert_eq!(
+            invite_repo_url("ssh://git@github.com/a/b.git"),
+            "ssh://git@github.com/a/b.git"
+        );
+    }
+
+    #[test]
+    fn an_ssh_remote_survives_the_link_untouched() {
+        // In an ssh address, `git@host` is the address, not a credential.
+        let link = build_invite_link("git@github.com:a/b.git", "b", "Ana");
+        let parsed = parse_invite_link(&link).expect("an ssh board is a board too");
+        assert_eq!(parsed.repo_url, "git@github.com:a/b.git");
+    }
+
+    #[test]
+    fn percent_encoding_survives_every_character_a_label_can_meet() {
+        // The format is a query, not form encoding: `+` is a plus, and a label
+        // with spaces, an accent, an ampersand and a percent must come back
+        // exactly as it went in.
+        let board = "Tablero ñ & + 100%";
+        let link = build_invite_link("https://github.com/a/b.git", board, "José");
+        let parsed = parse_invite_link(&link).expect("the built link must parse");
+        assert_eq!(parsed.board.as_deref(), Some(board));
+        assert_eq!(parsed.from.as_deref(), Some("José"));
+        assert!(
+            !link.contains("Tablero ñ"),
+            "a raw space would cut the link short: {}",
+            link
+        );
+
+        // The round trip alone cannot catch form decoding, because building
+        // always escapes `+` as %2B and a parser that turned `+` into a space
+        // would still pass it. A hand-written link is what pins the difference.
+        let hand = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=a+b&from=x+y",
+        )
+        .expect("the link is well formed");
+        assert_eq!(hand.board.as_deref(), Some("a+b"));
+        assert_eq!(hand.from.as_deref(), Some("x+y"));
+
+        // Padding is trimmed on purpose: a label is shown to a person, and a
+        // link that travelled through a messenger arrives with whitespace.
+        let padded = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=%20%20pad%20%20",
+        )
+        .expect("the link is well formed");
+        assert_eq!(padded.board.as_deref(), Some("pad"));
+    }
+
+    #[test]
+    fn a_broken_escape_is_reported_rather_than_guessed() {
+        for bad in ["%zz", "%", "%4", "%e2", "%e2%28%a1", "%FF%FE"] {
+            let link = format!("gitteam://join?repo={}", bad);
+            assert!(parse_invite_link(&link).is_err(), "accepted {:?}", bad);
+        }
+    }
+
+    // ----- T6: el link abre la app, y lo que llega puede no ser una invitación -----
+
+    #[test]
+    fn a_received_link_is_an_invitation_when_it_reads_as_one() {
+        let url =
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=b&from=Ana";
+        let intake = classify_received_links(&[url.to_string()]);
+        assert_eq!(intake.invite.as_deref(), Some(url));
+        assert_eq!(intake.not_an_invitation, None);
+    }
+
+    #[test]
+    fn a_gitteam_link_that_is_not_an_invitation_is_reported_rather_than_ignored() {
+        // El esquema es nuestro, así que lo que llegue por ahí no es
+        // necesariamente una invitación. Decirlo es la diferencia entre no hacer
+        // nada y no hacer nada *sin explicar por qué*.
+        for other in [
+            "gitteam://other?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git",
+            "gitteam://join",
+            "gitteam://join?board=only-a-label",
+            "https://github.com/a/b.git",
+        ] {
+            let intake = classify_received_links(&[other.to_string()]);
+            assert_eq!(intake.invite, None, "accepted {:?}", other);
+            assert_eq!(
+                intake.not_an_invitation.as_deref(),
+                Some(other),
+                "did not report {:?}",
+                other
+            );
+        }
+    }
+
+    #[test]
+    fn no_link_arrives_as_nothing_rather_than_as_an_error() {
+        // Arrancar la app sin link es el caso normal: no hay nada que avisar.
+        assert_eq!(classify_received_links(&[]), LinkIntake::default());
+        assert_eq!(
+            classify_received_links(&["".to_string(), "   ".to_string()]),
+            LinkIntake::default()
+        );
+    }
+
+    #[test]
+    fn the_invitation_wins_over_the_other_links_around_it() {
+        let link = "  gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git  ";
+        let intake = classify_received_links(&[
+            "gitteam://other".to_string(),
+            link.to_string(),
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fc%2Fd.git".to_string(),
+        ]);
+        // Recortado, porque un link que pasó por un mensajero llega con espacios.
+        assert_eq!(
+            intake.invite.as_deref(),
+            Some("gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git")
+        );
+        // Con una invitación en mano no hay nada que reprocharle a los demás.
+        assert_eq!(intake.not_an_invitation, None);
+    }
+
+    // Las cuatro de abajo las escribió la verificación independiente de T6 como
+    // sondas sobre el código de arriba, y se adoptaron tal cual: cubren el mismo
+    // contrato desde el otro lado (orden, repetidos, huecos entre links, y un
+    // escape roto que no se puede aceptar como invitación).
+
+    #[test]
+    fn received_links_first_invitation_wins_in_any_order() {
+        let a = "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git";
+        let b = "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fc%2Fd.git";
+        let intake = classify_received_links(&[b.to_string(), a.to_string()]);
+        assert_eq!(intake.invite.as_deref(), Some(b));
+        assert_eq!(intake.not_an_invitation, None);
+
+        // El mismo link dos veces no cambia nada.
+        let again = classify_received_links(&[a.to_string(), a.to_string()]);
+        assert_eq!(again.invite.as_deref(), Some(a));
+        assert_eq!(again.not_an_invitation, None);
+    }
+
+    #[test]
+    fn received_links_blank_entries_are_skipped_between_links() {
+        let a = "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git";
+        let intake = classify_received_links(&["  ".to_string(), a.to_string(), String::new()]);
+        assert_eq!(intake.invite.as_deref(), Some(a));
+        assert_eq!(intake.not_an_invitation, None);
+    }
+
+    #[test]
+    fn received_links_report_only_the_first_non_invitation() {
+        let intake =
+            classify_received_links(&["gitteam://x".to_string(), "gitteam://y".to_string()]);
+        assert_eq!(intake.invite, None);
+        assert_eq!(intake.not_an_invitation.as_deref(), Some("gitteam://x"));
+    }
+
+    #[test]
+    fn received_links_broken_escape_is_reported_not_accepted() {
+        // Un link que no se puede leer entero no es una invitación a medias: se
+        // informa, igual que en el pegado a mano.
+        let bad = "gitteam://join?repo=%zz&board=b";
+        let intake = classify_received_links(&[bad.to_string()]);
+        assert_eq!(intake.invite, None);
+        assert_eq!(intake.not_an_invitation.as_deref(), Some(bad));
+    }
+
+    // ----- T5: el dueño otorga el acceso por @usuario -----
+
+    #[test]
+    fn a_github_username_is_normalized_the_way_github_writes_it() {
+        assert_eq!(
+            normalize_github_username("  @Ana-Dev  ").unwrap(),
+            "Ana-Dev"
+        );
+        assert_eq!(normalize_github_username("ana").unwrap(), "ana");
+        // El límite de GitHub, de los dos lados.
+        assert_eq!(
+            normalize_github_username(&"a".repeat(39)).unwrap().len(),
+            39
+        );
+
+        for bad in [
+            "",
+            "   ",
+            "@",
+            "@@",
+            "ana dev",
+            "-ana",
+            "ana-",
+            "ana--dev",
+            "a--b",
+            "ana/dev",
+            "ana#dev",
+            "ana_dev",
+            "ana.",
+            "ana,",
+            "ana@dev",
+            "@ana@dev",
+            "áná",
+        ] {
+            let error = normalize_github_username(bad).expect_err("must be rejected");
+            assert!(!error.trim().is_empty(), "{:?} produced no reason", bad);
+        }
+
+        let too_long = "a".repeat(40);
+        assert!(normalize_github_username(&too_long).is_err());
+    }
+
+    #[test]
+    fn a_repository_is_named_by_its_owner_and_its_name() {
+        assert_eq!(
+            repo_full_name("https://github.com/astivens/royero-labs-board.git").as_deref(),
+            Some("astivens/royero-labs-board")
+        );
+        assert_eq!(
+            repo_full_name("git@github.com:astivens/board.git").as_deref(),
+            Some("astivens/board")
+        );
+        assert_eq!(
+            repo_full_name("https://ghp_secret@github.com/astivens/board").as_deref(),
+            Some("astivens/board")
+        );
+        assert_eq!(
+            repo_full_name("https://user:pass@github.com/astivens/board").as_deref(),
+            Some("astivens/board")
+        );
+        assert_eq!(
+            repo_full_name("ssh://git@github.com:2222/astivens/board.git").as_deref(),
+            Some("astivens/board")
+        );
+        // Un query pegado de más no es parte del nombre del repositorio.
+        assert_eq!(
+            repo_full_name("https://github.com/astivens/board.git?x=1").as_deref(),
+            Some("astivens/board")
+        );
+
+        // Otorgar acceso por usuario es una operación de GitHub: en otro host no
+        // hay nada que preguntar, y decirlo acá es mejor que fallar más tarde.
+        assert_eq!(repo_full_name("https://gitlab.com/astivens/board.git"), None);
+        assert_eq!(repo_full_name("https://github.com.other/astivens/board"), None);
+        // El host se lee después del último `@`: si no, una url se hace pasar
+        // por GitHub.
+        assert_eq!(
+            repo_full_name("https://github.com@evil.com/astivens/board"),
+            None
+        );
+        assert_eq!(repo_full_name("file:///home/anuar/boards/mine"), None);
+        assert_eq!(repo_full_name("https://github.com/astivens"), None);
+        assert_eq!(repo_full_name("/home/anuar/boards/mine"), None);
+    }
+
+    #[test]
+    fn the_collaborator_call_asks_for_write_access() {
+        // Como el cuerpo de la creación del board: lo que el cambio promete
+        // vive en un test, no sólo en un literal dentro de la llamada.
+        assert_eq!(
+            collaborator_invite_body(),
+            serde_json::json!({ "permission": "push" })
+        );
+    }
+
+    #[test]
+    fn a_new_invitation_and_an_existing_collaborator_read_differently() {
+        let invited = collaborator_result_message(201, "Ana-Dev");
+        assert!(invited.contains("Ana-Dev"), "{}", invited);
+        assert!(invited.to_lowercase().contains("accept"), "{}", invited);
+
+        let already = collaborator_result_message(204, "Ana-Dev");
+        assert!(already.contains("Ana-Dev"), "{}", already);
+        assert_ne!(invited, already);
+    }
+
+    #[test]
+    fn a_username_github_does_not_know_says_so() {
+        let message = collaborator_error_message(404, None, "{}", "ana");
+        assert!(message.contains("ana"), "{}", message);
+
+        // El mapeo general explica un 403 hablando de **crear un repositorio**,
+        // que no es lo que hace esta llamada: el alta de acceso tiene su propio
+        // motivo para ser rechazada y lo dice.
+        let forbidden = collaborator_error_message(403, None, r#"{"message":"Forbidden"}"#, "ana");
+        assert!(forbidden.contains("ana"), "{}", forbidden);
+        assert!(forbidden.contains("access"), "{}", forbidden);
+        assert!(
+            !forbidden.contains("creating a repository"),
+            "{}",
+            forbidden
+        );
+
+        // Lo que no tiene un caso propio sigue usando el mapeo general, que lee
+        // el cuerpo.
+        let validation =
+            collaborator_error_message(422, None, r#"{"message":"Validation Failed"}"#, "ana");
+        assert!(validation.contains("Validation Failed"), "{}", validation);
+    }
+
+    #[test]
+    fn a_403_with_the_repo_scope_does_not_claim_the_scope_is_missing() {
+        // El header puede decir que el scope está: entonces no se puede afirmar
+        // que falte. Lo que reporta el token es lo que separa "le falta el
+        // scope" de "esta cuenta no administra el repositorio".
+        let body = r#"{"message":"Forbidden"}"#;
+        let message = collaborator_error_message(403, Some("repo"), body, "ana");
+        assert!(message.contains("ana"), "{}", message);
+        assert!(!message.contains("missing the `repo` scope"), "{}", message);
+        assert!(!message.contains("creating a repository"), "{}", message);
+    }
+
+    #[test]
+    fn a_403_from_a_token_that_does_not_report_repo_still_names_the_missing_scope() {
+        // La otra mitad de la misma decisión: cuando el token reporta scopes y
+        // el `repo` no está entre ellos, el motivo sí es el scope que falta. Sin
+        // este test, esa rama se podía cambiar por la otra sin que nada cayera
+        // (lo encontró el recheck por mutación).
+        let body = r#"{"message":"Forbidden"}"#;
+        for scopes in [
+            Some("public_repo"),
+            Some("workflow"),
+            Some("repo_deployment"),
+        ] {
+            let message = collaborator_error_message(403, scopes, body, "ana");
+            assert!(message.contains("ana"), "{:?} -> {}", scopes, message);
+            assert!(
+                message.contains("missing the `repo` scope"),
+                "{:?} -> {}",
+                scopes,
+                message
+            );
+            assert!(message.contains("access"), "{:?} -> {}", scopes, message);
+        }
+    }
+
+    #[test]
+    fn a_403_from_granting_access_never_reads_as_repository_creation() {
+        let body = r#"{"message":"Forbidden"}"#;
+        for scopes in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("repo"),
+            Some("repo, workflow"),
+            Some("public_repo"),
+        ] {
+            let message = collaborator_error_message(403, scopes, body, "ana");
+            assert!(
+                !message.contains("creating a repository"),
+                "{:?} -> {}",
+                scopes,
+                message
+            );
+            assert!(message.contains("access"), "{}", message);
+        }
+    }
+
+    #[test]
+    fn a_status_without_a_case_of_its_own_still_uses_the_general_mapping() {
+        let body = r#"{"message":"Forbidden"}"#;
+        for status in [400u16, 401, 409, 422, 429, 500] {
+            assert_eq!(
+                collaborator_error_message(status, None, body, "ana"),
+                github_api_error(status, None, body)
+            );
+        }
+    }
+
+    // ----- T5: el invitado acepta la invitación que GitHub dejó pendiente -----
+
+    const PENDING_INVITATIONS: &str = r#"[
+      {
+        "id": 424242,
+        "repository": { "full_name": "astivens/royero-labs-board", "private": true },
+        "inviter": { "login": "astivens" },
+        "permissions": "write",
+        "expired": false
+      },
+      {
+        "id": 7,
+        "repository": { "full_name": "otra/board" },
+        "inviter": null,
+        "permissions": "read"
+      }
+    ]"#;
+
+    #[test]
+    fn pending_invitations_are_read_from_what_github_sends() {
+        let invites = pending_invitations_from_json(PENDING_INVITATIONS).expect("must parse");
+        assert_eq!(invites.len(), 2);
+        assert_eq!(invites[0].id, 424242);
+        assert_eq!(invites[0].repo, "astivens/royero-labs-board");
+        assert_eq!(invites[0].from.as_deref(), Some("astivens"));
+        assert_eq!(invites[1].from, None);
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_list_of_invitations_is_handled() {
+        assert!(pending_invitations_from_json("[]")
+            .expect("an empty list is not a failure")
+            .is_empty());
+        assert!(pending_invitations_from_json("not json").is_err());
+        assert!(pending_invitations_from_json("{}").is_err());
+
+        // Una invitación a la que le falta el repositorio o el identificador no
+        // se convierte en algo a medias: se informa.
+        for half in [
+            r#"[{"id":1}]"#,
+            r#"[{"id":1,"repository":null}]"#,
+            r#"[{"repository":{"full_name":"a/b"}}]"#,
+            r#"[{"id":"7","repository":{"full_name":"a/b"}}]"#,
+        ] {
+            assert!(
+                pending_invitations_from_json(half).is_err(),
+                "accepted {:?}",
+                half
+            );
+        }
+
+        // Quién la manda es opcional: no poder decirlo no invalida la invitación.
+        let invites =
+            pending_invitations_from_json(r#"[{"id":1,"repository":{"full_name":"a/b"}}]"#)
+                .expect("must parse");
+        assert_eq!(invites[0].from, None);
+    }
+
+    #[test]
+    fn the_invitation_offered_is_the_one_for_this_board() {
+        let invites = pending_invitations_from_json(PENDING_INVITATIONS).expect("must parse");
+        // GitHub no distingue mayúsculas en los nombres.
+        let found =
+            invitation_for_repo(&invites, "Astivens/Royero-Labs-Board").expect("must match");
+        assert_eq!(found.id, 424242);
+        assert_eq!(invitation_for_repo(&invites, "astivens/otra-cosa"), None);
+    }
+
+    #[test]
+    fn every_github_call_carries_the_same_headers() {
+        // Los headers se movieron a un solo lugar para que las tres llamadas de
+        // T5 no repitan cuatro líneas cada una; esto fija que siguen siendo los
+        // mismos que usaba la creación del board.
+        let headers = github_headers("ghp_secret");
+        let names: Vec<&str> = headers.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Authorization",
+                "Accept",
+                "X-GitHub-Api-Version",
+                "User-Agent"
+            ]
+        );
+        assert_eq!(headers[0].1, "Bearer ghp_secret");
+        assert_eq!(headers[3].1, "gitteam");
+
+        // La credencial viaja en un header y en ninguno más.
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(_, value)| value.contains("ghp_secret"))
+                .count(),
+            1
+        );
     }
 }

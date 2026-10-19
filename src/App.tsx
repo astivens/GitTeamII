@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { AppHeader } from "./components/layout/AppHeader";
 import {
   EmptyState,
@@ -20,6 +21,7 @@ import { ConflictModal } from "./components/conflicts/ConflictModal";
 import { useTicketsStore } from "./store/tickets";
 import { useGlobalShortcuts } from "./lib/keyboard";
 import { pushToast } from "./lib/toast";
+import { gitteamLinkIntake } from "./lib/tauri";
 import type { Ticket } from "./types/ticket";
 
 interface RemoteChangedPayload {
@@ -51,12 +53,20 @@ function App() {
   const [bootDone, setBootDone] = useState(false);
   /**
    * Forces the SetupScreen to render on demand, even when there are already
-   * linked projects. Set when the user clicks "Link repository" / "Link new
-   * repository" from the ProjectSwitcher empty-state pill or from the
-   * no-project main-area empty state. Cleared automatically once a project
-   * becomes active (SetupScreen completed successfully).
+   * linked projects. The value remembers which project was active when the user
+   * asked for the screen ("" when there was none): the screen has to close when
+   * a *different* project becomes active — that is a successful submission — and
+   * not the moment it opens, which is what made this CTA dead whenever a project
+   * was already linked.
    */
-  const [setupForced, setSetupForced] = useState(false);
+  const [setupForcedFrom, setSetupForcedFrom] = useState<string | null>(null);
+  /**
+   * The invitation that opened the SetupScreen, when the user got there by
+   * clicking a `gitteam://` link instead of pasting one. Cleared whenever the
+   * screen closes: left behind, the next "Link new repository" would open the
+   * join form holding somebody else's old invitation.
+   */
+  const [inviteFromLink, setInviteFromLink] = useState<string | null>(null);
 
   useEffect(() => {
     void loadProjects().finally(() => setBootDone(true));
@@ -68,17 +78,31 @@ function App() {
   // SetupScreen submission restores the normal app shell.
   useEffect(() => {
     function onLinkNew() {
-      setSetupForced(true);
+      setSetupForcedFrom(activeProject?.id ?? "");
     }
     window.addEventListener("gitteam:link-new-repo", onLinkNew);
     return () => window.removeEventListener("gitteam:link-new-repo", onLinkNew);
-  }, []);
+  }, [activeProject]);
 
   useEffect(() => {
-    if (activeProject && setupForced) {
-      setSetupForced(false);
+    if (
+      setupForcedFrom !== null &&
+      (activeProject?.id ?? "") !== setupForcedFrom
+    ) {
+      setSetupForcedFrom(null);
+      setInviteFromLink(null);
     }
-  }, [activeProject, setupForced]);
+  }, [activeProject, setupForcedFrom]);
+
+  // An invitation opens the SetupScreen, but only once the boot is over: until
+  // then there is no active project to remember, and forcing the screen with
+  // "nothing was active" makes the project that loads a moment later close it —
+  // which is losing the very invitation that opened the app. Same opener as the
+  // "Link new repository" CTA, so a successful join closes the screen.
+  useEffect(() => {
+    if (!inviteFromLink || !bootDone || setupForcedFrom !== null) return;
+    setSetupForcedFrom(activeProject?.id ?? "");
+  }, [inviteFromLink, bootDone, activeProject, setupForcedFrom]);
 
   // Window focus → auto-pull if synced and no pending local changes
   useEffect(() => {
@@ -132,6 +156,60 @@ function App() {
     };
   }, []);
 
+  // A `gitteam://` link is the other way into the join flow: the user clicks it
+  // in whatever messenger they already use. On Linux and Windows the OS does not
+  // hand the URL to the app that is already running — it starts a second
+  // instance, which the single-instance plugin turns into an event for this one.
+  // `getCurrent` covers the other half: when the link is what launched the app,
+  // that event fires before this listener exists.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+
+    async function openReceived(urls: string[] | null) {
+      if (!urls || urls.length === 0) return;
+      try {
+        // Which shape counts as an invitation is decided by the backend, the
+        // same place that reads a pasted one.
+        const intake = await gitteamLinkIntake(urls);
+        if (intake.invite) {
+          // Keeping the link is all this does: which project was active when it
+          // arrived is decided by the effect below, which waits for the boot to
+          // finish. Reading it here would see a project that has not loaded yet.
+          setInviteFromLink(intake.invite);
+          return;
+        }
+        if (intake.not_an_invitation) {
+          pushToast("That link is not a GitTeam invitation.", "error");
+        }
+      } catch (e) {
+        pushToast(
+          `Could not read that link: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+      }
+    }
+
+    void (async () => {
+      try {
+        const stop = await onOpenUrl((urls) => void openReceived(urls));
+        if (cancelled) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+        await openReceived(await getCurrent());
+      } catch {
+        // Not running inside Tauri (e.g. plain vite dev) — silently ignore.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Global shortcuts (Cmd+K, n, /, ?).
   useGlobalShortcuts();
 
@@ -179,15 +257,29 @@ function App() {
     [initialized, loading, tickets],
   );
 
+  const closeSetup = () => {
+    setInviteFromLink(null);
+    setSetupForcedFrom(null);
+  };
+
   // First-time setup: full-screen SetupScreen only when the user has never
   // linked a repository. If `projects > 0` but `activeProject === null` (e.g.
   // after the user removes their active project), we render the normal app
   // shell instead — the ProjectSwitcher pill in the header shows an empty
   // state and the main area shows the NoProjectEmptyState card.
-  if (bootDone && (setupForced || (syncStatus === "unconfigured" && projects.length === 0))) {
+  if (
+    bootDone &&
+    (setupForcedFrom !== null ||
+      (syncStatus === "unconfigured" && projects.length === 0))
+  ) {
     return (
       <div className="h-full bg-bg text-fg">
-        <SetupScreen />
+        <SetupScreen
+          initialInviteLink={inviteFromLink}
+          onCancel={
+            setupForcedFrom !== null && activeProject ? closeSetup : undefined
+          }
+        />
         <ToastHost />
         <HelpOverlay />
       </div>
@@ -248,7 +340,7 @@ function App() {
           // one). Show the no-project card with a CTA that reopens
           // SetupScreen.
           <NoProjectEmptyState
-            onLinkRepo={() => setSetupForced(true)}
+            onLinkRepo={() => setSetupForcedFrom("")}
           />
         ) : showEmpty ? (
           justSetup ? (
