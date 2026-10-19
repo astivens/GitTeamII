@@ -46,6 +46,15 @@ export interface InviteDetails {
   from: string | null;
 }
 
+/** An invitation GitHub is holding for someone, until they accept it. */
+export interface PendingInvitation {
+  id: number;
+  /** The repository's full name, `owner/repo`. */
+  repo: string;
+  /** Who sent it, when GitHub says. */
+  from: string | null;
+}
+
 export interface TestConnectionResult {
   ok: boolean;
   head_sha: string | null;
