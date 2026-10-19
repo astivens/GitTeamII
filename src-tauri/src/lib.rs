@@ -432,9 +432,18 @@ fn write_git_config(config: &GitConfig) -> Result<(), String> {
 // ----- url helpers -----
 
 fn with_authenticated_url(url: &str, pat: &str) -> String {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
+    let lowered = url.to_ascii_lowercase();
+    // The scheme is matched case-insensitively. A url pasted as `HTTPS://…` used
+    // to fall through to the `unwrap_or` arm and come out double-wrapped as
+    // `https://<pat>@HTTPS://…`: a broken remote, and the token behind a shape
+    // the redactor cannot recover once the first `/` closes the authority.
+    let without_scheme = ["https://", "http://"]
+        .iter()
+        .find_map(|prefix| {
+            lowered
+                .strip_prefix(prefix)
+                .map(|_| &url[prefix.len()..])
+        })
         .unwrap_or(url);
 
     let (host_with_userinfo, path) = match without_scheme.find('/') {
@@ -1728,7 +1737,12 @@ async fn setup_repo_inner(
 
     let mut config_to_save = config.clone();
     config_to_save.last_sync_at = Some(now_iso());
-    write_git_config(&config_to_save)?;
+    // The value that is written and the value that is returned are the same one:
+    // the frontend renders this url — the project chip's tooltip, the project
+    // list — so a token pasted into the connect form must not travel back to a
+    // screen after having been kept out of the file.
+    let stored = config_to_persist(&config_to_save);
+    write_git_config(&stored)?;
 
     let _ = run_git(
         &dir,
@@ -1752,7 +1766,7 @@ async fn setup_repo_inner(
     let head = git_head(&dir).await.unwrap_or(remote_head);
 
     Ok(SetupResult {
-        config: config_to_save,
+        config: stored,
         head_sha: head,
         files_count,
     })
@@ -5239,6 +5253,58 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             "https://github.com/astivens/board.git",
             "a url that never carried a credential is written as it came"
         );
+    }
+
+    #[test]
+    // S6 — an uppercase scheme used to be left in place, so the credentialed url
+    // came out double-wrapped and the token sat behind the `/` that closes the
+    // authority the redactor scans. It is normalised before the token goes in.
+    fn a_url_pasted_with_an_uppercase_scheme_is_not_double_wrapped() {
+        let authenticated = with_authenticated_url("HTTPS://github.com/astivens/board.git", "ghp_s");
+        assert_eq!(
+            authenticated, "https://x-access-token:ghp_s@github.com/astivens/board.git",
+            "one scheme, and the host is the one that was pasted"
+        );
+        assert_eq!(
+            authenticated.matches("https://").count(),
+            1,
+            "the url is not wrapped twice: {}",
+            authenticated
+        );
+        assert_eq!(
+            strip_userinfo(&authenticated),
+            "https://github.com/astivens/board.git",
+            "and what gets stored carries no credential"
+        );
+    }
+
+    #[test]
+    // S6 — the redaction applied to a command's stderr is defence in depth, and
+    // this pins the measurement it rests on: git strips the userinfo before it
+    // prints a url, so on every shape it produces the redactor is an identity.
+    // Offline: port 1 refuses the connection at once.
+    fn git_anonymises_the_url_it_prints_so_the_redactor_is_a_no_op_on_it() {
+        for url in [
+            "https://x-access-token:ghp_s@127.0.0.1:1/board.git",
+            "https://ghp_s@127.0.0.1:1/board.git",
+        ] {
+            let out = std::process::Command::new("git")
+                .args(["ls-remote", url, "HEAD"])
+                .output()
+                .expect("git could not be started");
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(!out.status.success(), "the probe must fail: {}", stderr);
+            assert!(
+                !stderr.contains("ghp_s"),
+                "git printed the credential: {}",
+                stderr
+            );
+            assert_eq!(
+                redact_credentials(&stderr),
+                stderr,
+                "nothing left for the redactor to do"
+            );
+        }
     }
 
     #[test]
