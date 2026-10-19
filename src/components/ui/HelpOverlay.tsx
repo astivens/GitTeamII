@@ -1,9 +1,11 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
 import { useTicketsStore } from "../../store/tickets";
+import { useI18n } from "../../lib/i18n";
 import { SHORTCUTS } from "../../lib/shortcuts";
 
 export function HelpOverlay() {
+  const { t } = useI18n();
   const open = useTicketsStore((s) => s.helpOpen);
   const closeHelp = useTicketsStore((s) => s.closeHelp);
 
@@ -44,12 +46,12 @@ export function HelpOverlay() {
         style={{ maxWidth: 480, boxShadow: "var(--shadow-elevated)" }}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b">
-          <h2 className="text-base font-semibold text-fg">Keyboard shortcuts</h2>
+          <h2 className="text-base font-semibold text-fg">{t.layout.keyboardShortcuts}</h2>
           <button
             type="button"
             className="btn-ghost"
             style={{ padding: 4 }}
-            aria-label="Close"
+            aria-label={t.common.close}
             onClick={closeHelp}
           >
             <X size={16} />
@@ -62,7 +64,7 @@ export function HelpOverlay() {
                 key={s.action}
                 className="flex items-center justify-between gap-4 py-2.5"
               >
-                <span className="text-sm text-fg-muted">{s.action}</span>
+                <span className="text-sm text-fg-muted">{t.layout[s.action]}</span>
                 <span className="flex items-center gap-1">
                   {s.keys.map((k, i) => (
                     <span key={i} className="kbd">

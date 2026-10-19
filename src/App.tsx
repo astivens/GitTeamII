@@ -21,6 +21,7 @@ import { ConflictModal } from "./components/conflicts/ConflictModal";
 import { useTicketsStore } from "./store/tickets";
 import { useGlobalShortcuts } from "./lib/keyboard";
 import { pushToast } from "./lib/toast";
+import { msg, useI18n } from "./lib/i18n";
 import { gitteamLinkIntake } from "./lib/tauri";
 import type { Ticket } from "./types/ticket";
 
@@ -35,6 +36,7 @@ type ModalState =
   | { kind: "edit"; ticket: Ticket };
 
 function App() {
+  const { t } = useI18n();
   const initialized = useTicketsStore((s) => s.initialized);
   const loading = useTicketsStore((s) => s.loading);
   const error = useTicketsStore((s) => s.error);
@@ -134,7 +136,7 @@ function App() {
             setRemoteSha(event.payload.sha);
             if (syncStatus === "synced" && pendingCommits.size === 0) {
               pushToast(
-                "Cambios remotos detectados — sincronizando…",
+                msg().layout.remoteChangesDetected,
                 "default",
               );
               void syncNow();
@@ -180,11 +182,13 @@ function App() {
           return;
         }
         if (intake.not_an_invitation) {
-          pushToast("That link is not a GitTeam invitation.", "error");
+          pushToast(msg().layout.notAnInvitation, "error");
         }
       } catch (e) {
         pushToast(
-          `Could not read that link: ${e instanceof Error ? e.message : String(e)}`,
+          msg().layout.couldNotReadLink(
+            e instanceof Error ? e.message : String(e),
+          ),
           "error",
         );
       }
@@ -237,16 +241,16 @@ function App() {
     return () => window.removeEventListener("gitteam:new-ticket", onShortcut);
   }, []);
 
-  const onDelete = async (t: Ticket) => {
-    const ok = window.confirm(`Delete ${t.id}? This cannot be undone.`);
+  const onDelete = async (ticket: Ticket) => {
+    const ok = window.confirm(t.layout.deleteTicketConfirm(ticket.id));
     if (!ok) return;
     try {
-      await remove(t.filename);
-      pushToast("Ticket deleted", "success");
+      await remove(ticket.filename);
+      pushToast(t.layout.ticketDeleted, "success");
       onClose();
     } catch (e) {
       pushToast(
-        `Error deleting: ${e instanceof Error ? e.message : String(e)}`,
+        t.layout.deleteError(e instanceof Error ? e.message : String(e)),
         "error",
       );
     }
@@ -307,16 +311,16 @@ function App() {
           </div>
         ) : error && !initialized ? (
           <div className="h-full w-full flex flex-col items-center justify-center gap-3">
-            <p className="text-fg-muted">Failed to initialize: {error}</p>
+            <p className="text-fg-muted">{t.layout.failedToInitialize(error)}</p>
             <Button variant="primary" onClick={() => void loadProjects()}>
               <RefreshCw size={14} />
-              Retry
+              {t.common.retry}
             </Button>
           </div>
         ) : syncStatus === "error" && !initialized ? (
           <div className="h-full w-full flex flex-col items-center justify-center gap-3 px-4 text-center">
             <p className="text-fg-muted">
-              Could not connect to the repository.
+              {t.layout.couldNotConnect}
             </p>
             {syncError ? (
               <p
@@ -332,7 +336,7 @@ function App() {
                 useTicketsStore.setState({ syncStatus: "unconfigured" });
               }}
             >
-              Set up again
+              {t.layout.setUpAgain}
             </Button>
           </div>
         ) : !activeProject && syncStatus === "unconfigured" ? (
@@ -351,8 +355,8 @@ function App() {
         ) : viewMode === "graph" ? (
           <GraphView
             onOpenTicket={(filename) => {
-              const t = tickets.find((x) => x.filename === filename);
-              if (t) onSelect(t);
+              const ticket = tickets.find((x) => x.filename === filename);
+              if (ticket) onSelect(ticket);
             }}
           />
         ) : (
@@ -373,8 +377,8 @@ function App() {
       <CommandPalette
         onCreateTicket={onNew}
         onEditTicket={(filename) => {
-          const t = tickets.find((x) => x.filename === filename);
-          if (t) onSelect(t);
+          const ticket = tickets.find((x) => x.filename === filename);
+          if (ticket) onSelect(ticket);
         }}
       />
 

@@ -1,21 +1,17 @@
 import { Inbox, Sparkles, FolderGit2, SearchX, PlugZap } from "lucide-react";
 import { Button } from "../ui/Button";
+import { useI18n } from "../../lib/i18n";
 
 interface EmptyStateProps {
   onCreate: () => void;
 }
-
-const ONBOARDING_STEPS: Array<{ num: string; label: string; hint?: string }> = [
-  { num: "1", label: "Create your first ticket", hint: "press n" },
-  { num: "2", label: "The ticket saves to disk + syncs to Git" },
-  { num: "3", label: "Press Cmd+K to search, navigate, sync", hint: "⌘K" },
-];
 
 /**
  * Board is empty (post-onboarding).
  * Voice: short and direct. Real CTA. Specific key.
  */
 export function EmptyState({ onCreate }: EmptyStateProps) {
+  const { t } = useI18n();
   return (
     <div
       className="h-full w-full flex flex-col items-center justify-center gap-4 text-center"
@@ -29,14 +25,15 @@ export function EmptyState({ onCreate }: EmptyStateProps) {
         <p
           className="font-mono text-lg font-bold text-fg"
         >
-          Board is empty.
+          {t.layout.boardIsEmpty}
         </p>
         <p className="text-fg-muted text-sm">
-          Drop a ticket. <span className="kbd">N</span> or click anywhere.
+          {t.layout.dropTicket} <span className="kbd">N</span>{" "}
+          {t.layout.dropTicketClick}
         </p>
       </div>
       <Button variant="primary" onClick={onCreate}>
-        New ticket
+        {t.layout.newTicket}
       </Button>
     </div>
   );
@@ -46,6 +43,18 @@ export function EmptyState({ onCreate }: EmptyStateProps) {
  * First-time onboarding. Three quick steps.
  */
 export function OnboardingState({ onCreate }: EmptyStateProps) {
+  const { t } = useI18n();
+  // Steps are built from the dictionary so their copy follows the language;
+  // the `⌘K` glyph is a key, not a word.
+  const steps = [
+    {
+      num: "1",
+      label: t.layout.onboardingStep1,
+      hint: t.layout.onboardingStep1Hint,
+    },
+    { num: "2", label: t.layout.onboardingStep2, hint: null },
+    { num: "3", label: t.layout.onboardingStep3, hint: "⌘K" },
+  ];
   return (
     <div
       className="h-full w-full flex flex-col items-center justify-center gap-6 text-center"
@@ -61,13 +70,13 @@ export function OnboardingState({ onCreate }: EmptyStateProps) {
         <Sparkles size={28} className="text-accent" />
       </div>
       <div className="space-y-1">
-        <h2 className="text-fg text-lg font-semibold">Welcome to GitTeam</h2>
+        <h2 className="text-fg text-lg font-semibold">{t.layout.onboardingTitle}</h2>
         <p className="text-fg-muted text-sm">
-          Your repository is connected and ready. Three quick steps:
+          {t.layout.onboardingSubtitle}
         </p>
       </div>
       <ol className="text-left w-full space-y-2">
-        {ONBOARDING_STEPS.map((step) => (
+        {steps.map((step) => (
           <li
             key={step.num}
             className="flex items-start gap-3 rounded-md border bg-bg-subtle px-3 py-2.5"
@@ -86,7 +95,7 @@ export function OnboardingState({ onCreate }: EmptyStateProps) {
         ))}
       </ol>
       <Button variant="primary" onClick={onCreate}>
-        New ticket
+        {t.layout.newTicket}
       </Button>
     </div>
   );
@@ -100,6 +109,7 @@ interface NoProjectProps {
  * No project linked. Voice: question as heading — invites, not instructs.
  */
 export function NoProjectEmptyState({ onLinkRepo }: NoProjectProps) {
+  const { t } = useI18n();
   return (
     <div className="h-full w-full flex flex-col items-center justify-center gap-4 text-center">
       <div
@@ -120,14 +130,14 @@ export function NoProjectEmptyState({ onLinkRepo }: NoProjectProps) {
       </div>
       <div className="space-y-1">
         <p className="font-mono text-lg font-bold text-fg">
-          Which repo today?
+          {t.layout.whichRepo}
         </p>
         <p className="text-fg-muted text-sm">
-          Link one to start tracking tickets in it.
+          {t.layout.linkRepoHint}
         </p>
       </div>
       <Button variant="primary" onClick={onLinkRepo}>
-        Link repository
+        {t.layout.linkRepository}
         <span className="kbd" style={{ marginLeft: 6 }}>⌘N</span>
       </Button>
     </div>
@@ -143,23 +153,26 @@ interface NoResultsProps {
  * No search results. Voice: echoes the query. Suggests how to broaden.
  */
 export function NoResultsEmptyState({ query, onCreate }: NoResultsProps) {
+  const { t } = useI18n();
   return (
     <div className="h-full w-full flex flex-col items-center justify-center gap-4 text-center">
       <div className="rounded-full p-4 border bg-bg-subtle">
         <SearchX size={28} className="text-fg-muted" />
       </div>
       <div className="space-y-1">
-        <p className="font-mono text-sm text-accent">~ {query || "empty"}</p>
+        <p className="font-mono text-sm text-accent">
+          ~ {query || t.layout.emptyQuery}
+        </p>
         <p className="font-mono text-base font-bold text-fg">
-          No matches for {query}
+          {t.layout.noMatches(query)}
         </p>
         <p className="text-fg-muted text-sm">
-          Try fuzzy: shorter or longer fragments, tags, or numbers.
+          {t.layout.noResultsHint}
         </p>
       </div>
       {onCreate ? (
         <Button variant="outline" onClick={onCreate}>
-          Create new
+          {t.layout.createNew}
         </Button>
       ) : null}
     </div>
@@ -178,6 +191,7 @@ export function DisconnectedEmptyState({
   onReconnect,
   onDisconnect,
 }: DisconnectedProps) {
+  const { t } = useI18n();
   return (
     <div className="h-full w-full flex flex-col items-center justify-center gap-4 text-center">
       <div
@@ -217,22 +231,22 @@ export function DisconnectedEmptyState({
         />
       </div>
       <div className="space-y-1">
-        <p className="font-mono text-lg font-bold text-fg">Repo link broke</p>
+        <p className="font-mono text-lg font-bold text-fg">{t.layout.repoLinkBroke}</p>
         <p className="text-fg-muted text-sm" style={{ maxWidth: 420 }}>
-          PAT expired or remote moved. Sync paused, your edits are safe locally.
+          {t.layout.repoLinkBrokeHint}
         </p>
       </div>
       <div className="flex items-center gap-2">
         <Button variant="primary" onClick={onReconnect}>
           <PlugZap size={14} />
-          Reconnect
+          {t.layout.reconnect}
         </Button>
         <Button variant="outline" onClick={onDisconnect}>
-          Disconnect
+          {t.layout.disconnect}
         </Button>
       </div>
       <p className="font-mono text-xs text-fg-subtle mt-2">
-        Local-first promise: your work is never lost.
+        {t.layout.localFirstPromise}
       </p>
     </div>
   );

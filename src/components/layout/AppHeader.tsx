@@ -17,9 +17,12 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { BrandLockup } from "../ui/Brand";
+import { LanguageSwitcher } from "../ui/LanguageSwitcher";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { useTicketsStore } from "../../store/tickets";
-import { THEMES, THEME_LABELS, type Theme } from "../../lib/theme";
+import { useI18n } from "../../lib/i18n";
+import type { Dictionary } from "../../lib/i18n/en";
+import { THEMES, type Theme } from "../../lib/theme";
 
 interface AppHeaderProps {
   onNewTicket: () => void;
@@ -31,23 +34,28 @@ const THEME_ICONS: Record<Theme, LucideIcon> = {
   obsidian: Sparkles,
 };
 
-function formatRelativeTime(iso: string | null): string {
+/**
+ * Formats the last sync time with the shared relative-time messages, so the
+ * thresholds stay the same and only the wording follows the language.
+ */
+function formatRelativeTime(iso: string | null, t: Dictionary): string {
   if (!iso) return "";
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
   const now = Date.now();
   const diffSec = Math.max(0, Math.floor((now - then) / 1000));
-  if (diffSec < 5) return "just now";
-  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 5) return t.common.justNow;
+  if (diffSec < 60) return t.common.secondsAgo(diffSec);
   const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin} min ago`;
+  if (diffMin < 60) return t.common.minutesAgo(diffMin);
   const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr} hr ago`;
+  if (diffHr < 24) return t.common.hoursAgo(diffHr);
   const diffDay = Math.floor(diffHr / 24);
-  return `${diffDay}d ago`;
+  return t.common.daysAgo(diffDay);
 }
 
 export function AppHeader({ onNewTicket }: AppHeaderProps) {
+  const { t } = useI18n();
   const syncStatus = useTicketsStore((s) => s.syncStatus);
   const syncError = useTicketsStore((s) => s.syncError);
   const lastSyncedAt = useTicketsStore((s) => s.lastSyncedAt);
@@ -61,8 +69,8 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   const setTheme = useTicketsStore((s) => s.setTheme);
 
   const relativeTime = useMemo(
-    () => formatRelativeTime(lastSyncedAt),
-    [lastSyncedAt],
+    () => formatRelativeTime(lastSyncedAt, t),
+    [lastSyncedAt, t],
   );
 
   const syncDisabled = syncStatus === "unconfigured" || syncStatus === "syncing";
@@ -84,14 +92,14 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
               {/* Soft pulse ring — same color, expanding outward, fading out */}
               <span className="sync-pulse" />
             </span>
-            Syncing
+            {t.layout.syncing}
           </span>
         );
       case "synced":
         return (
           <span className="flex items-center gap-1 text-xs">
             <Check size={14} style={{ color: "var(--status-done)" }} />
-            <span className="text-fg-muted">Synced</span>
+            <span className="text-fg-muted">{t.layout.synced}</span>
             {relativeTime ? (
               <span className="text-fg-subtle">· {relativeTime}</span>
             ) : null}
@@ -102,10 +110,10 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           <span
             className="flex items-center gap-1 text-xs"
             style={{ color: "var(--priority-urgent)" }}
-            title={syncError ?? "Sync error"}
+            title={syncError ?? t.layout.syncError}
           >
             <AlertCircle size={14} />
-            Sync error
+            {t.layout.syncError}
           </span>
         );
       case "conflict":
@@ -113,17 +121,17 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           <span
             className="flex items-center gap-1 text-xs"
             style={{ color: "var(--priority-high)" }}
-            title={syncError ?? "Sync conflict"}
+            title={syncError ?? t.layout.syncConflict}
           >
             <AlertTriangle size={14} />
-            Conflict
+            {t.layout.conflict}
           </span>
         );
       case "unconfigured":
       default:
         return (
           <span className="flex items-center gap-1 text-fg-subtle text-xs">
-            Not synced
+            {t.layout.notSynced}
           </span>
         );
     }
@@ -134,30 +142,30 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
       <div className="flex items-center gap-3">
         <BrandLockup size={24} />
         {indicator}
-        <div className="view-toggle" role="group" aria-label="View">
+        <div className="view-toggle" role="group" aria-label={t.layout.viewLabel}>
           <button
             type="button"
             aria-pressed={viewMode === "board"}
             onClick={() => setViewMode("board")}
-            title="Board view (g then k)"
+            title={t.layout.boardViewHint}
           >
             <LayoutGrid size={13} />
-            Board
+            {t.layout.boardView}
           </button>
           <button
             type="button"
             aria-pressed={viewMode === "graph"}
             onClick={() => setViewMode("graph")}
-            title="Graph view (g then g)"
+            title={t.layout.graphViewHint}
           >
             <Network size={13} />
-            Graph
+            {t.layout.graphView}
           </button>
         </div>
-        <div className="view-toggle" role="group" aria-label="Theme">
+        <div className="view-toggle" role="group" aria-label={t.layout.themeLabel}>
           {THEMES.map((option) => {
             const Icon = THEME_ICONS[option];
-            const label = `${THEME_LABELS[option]} theme`;
+            const label = t.layout.themeNamed(t.layout.themeNames[option]);
             return (
               <button
                 key={option}
@@ -172,6 +180,7 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
             );
           })}
         </div>
+        <LanguageSwitcher />
       </div>
       <div className="flex items-center gap-2">
         {/* Search button — opens the command palette and doubles as a discoverability hint. */}
@@ -181,7 +190,7 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           className="search-trigger"
         >
           <Search size={14} />
-          <span>Search…</span>
+          <span>{t.common.search}</span>
           <span className="kbd">⌘K</span>
         </button>
 
@@ -189,10 +198,10 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           variant="ghost"
           onClick={() => void syncNow()}
           disabled={syncDisabled}
-          aria-label="Sync now"
+          aria-label={t.layout.syncNow}
         >
           <RefreshCw size={14} />
-          Sync
+          {t.layout.sync}
         </Button>
 
         <ProjectSwitcher />
@@ -201,8 +210,8 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           <Button
             variant="ghost"
             onClick={() => void removeActiveProject()}
-            aria-label="Disconnect repository"
-            title="Disconnect repository"
+            aria-label={t.layout.disconnectRepository}
+            title={t.layout.disconnectRepository}
           >
             <Plug size={14} />
           </Button>
@@ -213,15 +222,15 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
           onClick={openHelp}
           className="btn-ghost"
           style={{ padding: 8 }}
-          aria-label="Keyboard shortcuts"
-          title="Keyboard shortcuts (?)"
+          aria-label={t.layout.keyboardShortcuts}
+          title={t.layout.keyboardShortcutsHint}
         >
           <HelpCircle size={14} />
         </button>
 
         <Button variant="primary" onClick={onNewTicket}>
           <Plus size={14} />
-          New ticket
+          {t.layout.newTicket}
         </Button>
       </div>
     </header>
