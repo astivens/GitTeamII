@@ -4,7 +4,7 @@ Objetivo: que dos o más personas compartan un board de tickets sin que nadie te
 
 Rama: `fase-6-v2-redesign` (tracker) · Runner: `cargo test` (Rust) y `npx tsc --noEmit` + `pnpm build` (frontend; no hay runner de tests JS) · Entrega: work-unit commits; el PR se decide cuando el usuario lo pida.
 
-Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`) y **T3 está implementado junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`): un link que del otro lado nadie puede canjear es una UI que miente. T5–T7 siguen pendientes. El diseño no cambió al implementar salvo donde el Log lo dice.
+Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`), **T3 junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`) — un link que del otro lado nadie puede canjear es una UI que miente — y **T5** (`cb16d79` + `1036d33`). T6–T7 siguen pendientes. El diseño no cambió al implementar salvo donde el Log lo dice.
 
 ## Specs
 
@@ -46,7 +46,7 @@ Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b
 | T2 | S2 | Errores por scope faltante y por nombre tomado | inline | **hecho** dentro de T1 (`3fa2b1e` + `a7b8cc8`) |
 | T3 | S3 | Generar y parsear el link de invitación (UI de copiar/pegar) | inline | **hecho** `a5c424f` + `d5805fc` |
 | T4 | S4 | Flujo "Unirme a un board" (clonar con el PAT del que entra) | inline | **hecho** dentro de T3 (`a5c424f`); el clone real quedó sin ejercitar (sin red ni cuenta) |
-| T5 | S5 | Invitar por `@usuario` + aceptar invitaciones pendientes | inline | pendiente |
+| T5 | S5 | Invitar por `@usuario` + aceptar invitaciones pendientes | inline | **hecho** `cb16d79` + `1036d33` |
 | T6 | S3 | Deep link `gitteam://` (registro del esquema) | inline | pendiente |
 | T7 | S6 | Verificación de que ni el link ni el repo llevan credenciales | inline | pendiente |
 
@@ -96,3 +96,16 @@ T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo
   - Lo que **no** se pudo verificar y no se afirma: el clone real del flujo de unirse (sin red ni cuenta: el camino quedó cubierto sólo por lectura) y el runtime de la UI (no hay runner de tests JS).
   - Nota de entorno que costó caro: el verificador copió el repo a `/tmp` para probar —`/tmp` acá es un tmpfs de 12 GB y `src-tauri/target` pesa 13 GB— y dejó `/tmp` al 100 %; el scratch se limpió y de acá en más va a `/var/tmp`.
 - **L9 (2026-10-18)** — RDD sobre la rebanada `fc7a2e4..d5805fc`: `risk: medium`, `review_due: false`, `review_due_reason: under_budget` (17 paths, ~2.2k líneas). La frontera revisada sigue en `fc7a2e4`: el borde no se movió y el review nativo no se dispara todavía.
+- **L10 (2026-10-18)** — OK del usuario, verbatim: *"Sigue"* (respuesta a la pregunta de si seguía con T5). Alcance autorizado: **T5** (S5).
+
+  **T5 implementado** en dos work units: `cb16d79` (backend + superficie de API, 554 inserciones / 44 borrados en 3 archivos) y `1036d33` (UI, 203 inserciones en 2 archivos). Las dos mitades de S5, juntas porque se necesitan: el **dueño** da acceso por nombre de usuario desde el panel de invitación (`PUT /repos/{owner}/{repo}/collaborators/{username}` con el PAT del proyecto activo: 201 = invitación creada y pendiente, 204 = ya era colaborador, y las dos situaciones dicen cosas distintas en pantalla), y el **invitado** puede listar y aceptar la pendiente con **su** token, para que la aceptación no dependa del mail. Los códigos y las formas de respuesta salen de la doc de GitHub, no de memoria.
+
+  Dónde vive la aceptación, que era la decisión de diseño que S5 no fijaba: en el modo unirse, **después** de que el test de conexión falle. El invitado pega el link, escribe su token y el clone falla por permiso; ahí la app pregunta si GitHub tiene una invitación para ese board y ofrece aceptarla y seguir. Es el momento en que el dato sirve, y usa el token que el invitado ya escribió —no hace falta que exista un proyecto suyo todavía—. La alternativa (una pantalla aparte) necesita un token que en ese punto no está en ningún lado.
+
+  Piezas de apoyo, con motivo: `github_client`, `github_headers` y `oauth_scopes` mueven la forma HTTP de las llamadas a GitHub a un solo lugar —las tres llamadas nuevas y la creación del board—, y un test fija los headers, que antes vivían en una cadena de llamadas y no tenían red; `normalize_github_username` rechaza con motivo lo que GitHub no podría tener, antes de gastar una llamada; `repo_full_name` lee `dueño/repo` de un remoto y devuelve `None` fuera de GitHub, porque otorgar acceso por usuario es una operación de GitHub y en otro host no hay qué preguntar.
+
+  Un test encontró un defecto **real**, no del test: `github_api_error` (de T1) explicaba un 403 hablando de **crear un repositorio** —acción equivocada para el alta de acceso—. El alta tiene ahora su propio motivo, y un test fija que mencione el acceso y que **no** diga "creating a repository", mientras los status sin caso propio siguen usando el mapeo general.
+
+  El warning de `invitation_for_repo` sin usar decidió una costura: el emparejamiento invitación↔board vive en Rust y no duplicado en TypeScript, así que `github_pending_invitations(pat, repo_url?)` filtra por el board cuando se lo pide. Listar todo sigue siendo la operación de S5 cuando no se pasa repo.
+
+  Evidencia: RED primero (22 errores de compilación: siete funciones del núcleo no existían), después **79 tests de unidad + 2 de integración en verde** (70 antes de T5), `npx tsc --noEmit` en 0 y `pnpm build` en 0. Límite honesto: las tres llamadas a GitHub —alta de colaborador, listar y aceptar— no se pueden ejercer sin red ni cuenta, así que están cubiertas sólo en sus decisiones puras (normalización del usuario, `dueño/repo`, cuerpo de la llamada, mensajes por status, lectura y emparejamiento de la lista de invitaciones), y la llamada quedó delgada a propósito; el flujo de aceptar en la UI no tiene runner de tests JS en el repo. `Risk: item 2` (otorga acceso al repositorio: cambia quién puede leer un board) e `item 6` (la llamada no la cubre ningún test).
