@@ -3,6 +3,7 @@ import { GitBranch, Loader2 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { useTicketsStore } from "../../store/tickets";
+import { useI18n } from "../../lib/i18n";
 import { pushToast } from "../../lib/toast";
 import * as api from "../../lib/tauri";
 import type { InviteDetails, PendingInvitation } from "../../types/git";
@@ -31,6 +32,7 @@ interface SetupScreenProps {
  * repository of its own and the one holding the code is never involved.
  */
 export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
+  const { t } = useI18n();
   const addProject = useTicketsStore((s) => s.addProject);
   const createBoard = useTicketsStore((s) => s.createBoard);
   const activeProject = useTicketsStore((s) => s.activeProject);
@@ -78,7 +80,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
   async function readInvite(text: string) {
     const trimmed = text.trim();
     if (!trimmed) {
-      setError("Paste the invitation link you were sent.");
+      setError(t.setup.errors.invitationRequired);
       return;
     }
     setBusy(true);
@@ -125,7 +127,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
   ) => {
     const test = await api.gitTestConnection(target, token);
     if (!test.ok) {
-      setError(test.error ?? "Could not connect to the repository.");
+      setError(test.error ?? t.setup.errors.connectFailed);
       try {
         const [invitation] = await api.githubPendingInvitations(token, target);
         setPending(invitation ? { invitation, target } : null);
@@ -142,7 +144,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
       user_name: name,
       user_email: email,
     });
-    pushToast(`Connected to ${test.repo_name}`, "success");
+    pushToast(t.setup.toasts.connected(test.repo_name), "success");
   };
 
   const acceptPending = async () => {
@@ -153,7 +155,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
       await api.githubAcceptInvitation(pat.trim(), pending.invitation.id);
       const target = pending.target;
       setPending(null);
-      pushToast("Invitation accepted", "success");
+      pushToast(t.setup.toasts.invitationAccepted, "success");
       await joinBoard(
         target,
         pat.trim(),
@@ -178,7 +180,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
 
     if (mode === "connect") {
       if (!trimmedUrl || !trimmedPat || !trimmedName || !trimmedEmail) {
-        setError("All fields are required.");
+        setError(t.setup.errors.allFieldsRequired);
         return;
       }
     } else if (mode === "create") {
@@ -186,17 +188,13 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
         !identityIsInherited &&
         (!trimmedPat || !trimmedName || !trimmedEmail)
       ) {
-        setError(
-          "A token, a git user name and a git user email are required to create the first board.",
-        );
+        setError(t.setup.errors.createCredentialsRequired);
         return;
       }
     } else if (!trimmedPat || !trimmedName || !trimmedEmail) {
       // Joining is the one path where nothing can be inherited: the credential
       // is the joiner's own, and there is no board here to take an identity from.
-      setError(
-        "Your own token, name and email are required: a private board clones with your credentials.",
-      );
+      setError(t.setup.errors.joinCredentialsRequired);
       return;
     }
 
@@ -209,7 +207,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
           user_name: trimmedName,
           user_email: trimmedEmail,
         });
-        pushToast(`Created ${project.name}`, "success");
+        pushToast(t.setup.toasts.created(project.name), "success");
       } else {
         await joinBoard(
           invite ? invite.repo_url : trimmedUrl,
@@ -247,7 +245,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
             className="flex-1"
             onClick={() => switchMode("connect")}
           >
-            Connect a repository
+            {t.setup.modes.connect.button}
           </Button>
           <Button
             type="button"
@@ -255,7 +253,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
             className="flex-1"
             onClick={() => switchMode("create")}
           >
-            Create a board
+            {t.setup.modes.create.button}
           </Button>
           <Button
             type="button"
@@ -263,7 +261,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
             className="flex-1"
             onClick={() => switchMode("join")}
           >
-            Join a board
+            {t.setup.modes.join.button}
           </Button>
         </div>
 
@@ -273,39 +271,28 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
         >
           <div className="flex flex-col gap-1">
             <h2 className="text-fg font-medium">
-              {mode === "connect"
-                ? "Connect your team's repository"
-                : mode === "create"
-                  ? "Create a board"
-                  : "Join a board"}
+              {t.setup.modes[mode].heading}
             </h2>
             <p className="text-fg-muted text-sm">
               {mode === "connect" ? (
                 <>
-                  GitTeam keeps a local copy under{" "}
+                  {t.setup.modes.connect.descriptionBefore}{" "}
                   <code className="font-mono text-fg-subtle">
                     ~/.gitteam/projects/
                   </code>{" "}
-                  and keeps it in sync.
+                  {t.setup.modes.connect.descriptionAfter}
                 </>
               ) : mode === "create" ? (
-                <>
-                  GitTeam creates a private repository on GitHub that holds only
-                  tickets. Sharing a board is sharing that repository, so the
-                  repository holding your code is never involved.
-                </>
+                t.setup.modes.create.description
               ) : (
-                <>
-                  Paste the invitation you were sent. GitTeam shows you which
-                  board it is for before it clones anything.
-                </>
+                t.setup.modes.join.description
               )}
             </p>
           </div>
 
           {mode === "connect" ? (
             <Input
-              label="Repository URL"
+              label={t.setup.modes.connect.repositoryLabel}
               type="text"
               value={url}
               onChange={(e) => {
@@ -324,12 +311,14 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
 
           {mode === "create" ? (
             <Input
-              label="Board name"
+              label={t.setup.modes.create.boardNameLabel}
               type="text"
               value={boardName}
               onChange={(e) => setBoardName(e.currentTarget.value)}
               placeholder={
-                activeProject ? `${activeProject.name}-board` : "my-team-board"
+                activeProject
+                  ? t.setup.modes.create.suggestedBoardName(activeProject.name)
+                  : t.setup.modes.create.boardNamePlaceholder
               }
               autoFocus
               autoComplete="off"
@@ -340,7 +329,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
           {mode === "join" ? (
             <>
               <Input
-                label="Invitation link"
+                label={t.setup.modes.join.invitationLabel}
                 type="text"
                 value={inviteLink}
                 onChange={(e) => {
@@ -362,13 +351,13 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
                   <p className="text-fg text-sm">
                     {invite.board ? (
                       <>
-                        Board{" "}
+                        {t.setup.invite.board}{" "}
                         <span className="font-mono">{invite.board}</span>
                       </>
                     ) : (
-                      "A board"
+                      t.setup.invite.unnamedBoard
                     )}
-                    {invite.from ? <> · invited by {invite.from}</> : null}
+                    {invite.from ? t.setup.invite.invitedBy(invite.from) : null}
                   </p>
                   <p
                     className="text-fg-subtle text-xs font-mono"
@@ -387,8 +376,8 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
                 <Input
                   label={
                     identityIsInherited
-                      ? "Personal access token (optional)"
-                      : "Personal access token"
+                      ? t.setup.token.optionalLabel
+                      : t.setup.token.label
                   }
                   type="password"
                   value={pat}
@@ -399,17 +388,14 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
                 />
                 <p className="text-fg-subtle text-xs">
                   {identityIsInherited ? (
-                    "Leave it empty to reuse the token already saved for this project."
+                    t.setup.token.inheritedHint
                   ) : mode === "join" ? (
-                    <>
-                      The board is private, so it clones with your own access to
-                      GitHub — the same token you would use to clone it by hand.
-                    </>
+                    t.setup.token.joinHint
                   ) : (
                     <>
-                      GitHub → Settings → Developer settings → Personal access
-                      tokens (classic, with{" "}
-                      <code className="font-mono">repo</code> scope)
+                      {t.setup.token.scopeHintBefore}{" "}
+                      <code className="font-mono">repo</code>{" "}
+                      {t.setup.token.scopeHintAfter}
                     </>
                   )}
                 </p>
@@ -423,36 +409,32 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
                 }}
               >
                 <Input
-                  label="Git user name"
+                  label={t.setup.identity.nameLabel}
                   type="text"
                   value={userName}
                   onChange={(e) => setUserName(e.currentTarget.value)}
-                  placeholder="Carlos Dev"
+                  placeholder={t.setup.identity.namePlaceholder}
                   autoComplete="off"
                 />
                 <Input
-                  label="Git user email"
+                  label={t.setup.identity.emailLabel}
                   type="email"
                   value={userEmail}
                   onChange={(e) => setUserEmail(e.currentTarget.value)}
-                  placeholder="carlos@example.com"
+                  placeholder={t.setup.identity.emailPlaceholder}
                   autoComplete="off"
                 />
               </div>
 
               {identityIsInherited ? (
                 <p className="text-fg-subtle text-xs">
-                  Leave the name and email empty to reuse the ones already saved
-                  for this project.
+                  {t.setup.identity.inheritedHint}
                 </p>
               ) : null}
 
               {mode === "join" ? (
                 <p className="text-fg-subtle text-xs">
-                  Your access has to be granted by whoever invited you: the link
-                  is not a key, and the board is private. If they already gave it
-                  to you by user name, GitTeam offers to accept the invitation
-                  here.
+                  {t.setup.modes.join.accessHint}
                 </p>
               ) : null}
             </>
@@ -481,12 +463,12 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
               }}
             >
               <p className="text-fg">
-                GitHub is holding an invitation for you on{" "}
+                {t.setup.pending.holding}{" "}
                 <span className="font-mono">{pending.invitation.repo}</span>
-                {pending.invitation.from ? (
-                  <> · sent by {pending.invitation.from}</>
-                ) : null}
-                . A private board clones once it is accepted.
+                {pending.invitation.from
+                  ? t.setup.pending.sentBy(pending.invitation.from)
+                  : null}
+                {t.setup.pending.after}
               </p>
               <Button
                 type="button"
@@ -497,7 +479,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
                 {busy ? (
                   <Loader2 size={14} className="animate-spin" />
                 ) : null}
-                Accept and join
+                {t.setup.pending.accept}
               </Button>
             </div>
           ) : null}
@@ -512,21 +494,21 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
               <>
                 <Loader2 size={14} className="animate-spin" />
                 {mode === "create"
-                  ? "Creating…"
+                  ? t.setup.actions.busyCreate
                   : checkingInvite
-                    ? "Checking…"
-                    : "Testing & connecting…"}
+                    ? t.setup.actions.busyChecking
+                    : t.setup.actions.busyConnect}
               </>
             ) : mode === "create" ? (
-              "Create board"
+              t.setup.actions.submitCreate
             ) : mode === "join" ? (
               checkingInvite ? (
-                "Check link"
+                t.setup.actions.submitCheckLink
               ) : (
-                "Join this board"
+                t.setup.actions.submitJoin
               )
             ) : (
-              "Test & Connect"
+              t.setup.actions.submitConnect
             )}
           </Button>
         </form>
@@ -538,7 +520,7 @@ export function SetupScreen({ onCancel, initialInviteLink }: SetupScreenProps) {
             className="w-full"
             onClick={onCancel}
           >
-            Back to my board
+            {t.setup.actions.back}
           </Button>
         ) : null}
       </div>

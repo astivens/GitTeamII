@@ -4,6 +4,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
 import { pushToast } from "../../lib/toast";
+import { useI18n } from "../../lib/i18n";
 import * as api from "../../lib/tauri";
 
 interface InviteBoardModalProps {
@@ -24,6 +25,7 @@ interface InviteBoardModalProps {
  * Saying both here is what keeps the flow from being discovered through an error.
  */
 export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps) {
+  const { t } = useI18n();
   const [link, setLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -59,11 +61,11 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
     try {
       await writeText(link);
       setCopied(true);
-      pushToast("Invitation copied", "success");
+      pushToast(t.layout.invitationCopied, "success");
       window.setTimeout(() => setCopied(false), 1500);
     } catch (e) {
       pushToast(
-        `Could not copy: ${e instanceof Error ? e.message : String(e)}`,
+        t.layout.couldNotCopy(e instanceof Error ? e.message : String(e)),
         "error",
       );
     }
@@ -88,7 +90,7 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
     <Modal
       open={open}
       onClose={onClose}
-      title={`Invite someone to ${board}`}
+      title={t.layout.inviteTitle(board)}
       footer={
         <Button
           type="button"
@@ -98,11 +100,11 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
         >
           {copied ? (
             <>
-              <Check size={14} /> Copied
+              <Check size={14} /> {t.common.copied}
             </>
           ) : (
             <>
-              <Copy size={14} /> Copy link
+              <Copy size={14} /> {t.layout.copyLink}
             </>
           )}
         </Button>
@@ -110,8 +112,7 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
     >
       <div className="flex flex-col gap-3">
         <p className="text-fg-muted text-sm">
-          Pass this link through whatever you already use — a message, an email.
-          Whoever pastes it into GitTeam gets this board.
+          {t.layout.inviteBlurb}
         </p>
 
         {link ? (
@@ -121,7 +122,7 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
             value={link}
             readOnly
             spellCheck={false}
-            aria-label="Invitation link"
+            aria-label={t.layout.invitationLink}
             onFocus={(e) => e.currentTarget.select()}
           />
         ) : error ? (
@@ -130,13 +131,12 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
           </p>
         ) : (
           <p className="text-fg-subtle text-sm flex items-center" style={{ gap: 8 }}>
-            <Loader2 size={14} className="animate-spin" /> Preparing the link…
+            <Loader2 size={14} className="animate-spin" /> {t.layout.preparingLink}
           </p>
         )}
 
         <p className="text-fg-subtle text-xs">
-          The link is not a key: this board is private, so on the other side they
-          also need access to the repository on GitHub.
+          {t.layout.inviteNotAKey}
         </p>
 
         <div
@@ -147,8 +147,7 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
           }}
         >
           <p className="text-fg-muted text-sm">
-            Give them access by their GitHub user name. GitHub sends them the
-            invitation, and their app can accept it without waiting for the mail.
+            {t.layout.grantByUsernameHint}
           </p>
           <div className="flex items-center" style={{ gap: 8 }}>
             <input
@@ -159,7 +158,7 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
               placeholder="@ana-dev"
               autoComplete="off"
               spellCheck={false}
-              aria-label="GitHub user name"
+              aria-label={t.layout.githubUsername}
             />
             <Button
               type="button"
@@ -172,7 +171,7 @@ export function InviteBoardModal({ open, onClose, board }: InviteBoardModalProps
               ) : (
                 <UserPlus size={14} />
               )}
-              Give access
+              {t.layout.giveAccess}
             </Button>
           </div>
           {grantMessage ? (

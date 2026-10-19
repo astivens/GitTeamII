@@ -6,6 +6,7 @@ import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
 import { CopyForAIButton } from "./CopyForAIButton";
 import { useTicketsStore } from "../../store/tickets";
+import { useI18n } from "../../lib/i18n";
 import { splitTags } from "../../lib/markdown";
 import { pushToast } from "../../lib/toast";
 import type { CreateTicketInput, Ticket, TicketPriority, TicketStatus } from "../../types/ticket";
@@ -18,20 +19,17 @@ interface TicketModalProps {
   onDelete: (() => void) | null;
 }
 
-const STATUS_OPTIONS: Array<{ value: TicketStatus; label: string }> = [
-  { value: "backlog", label: "Backlog" },
-  { value: "in-progress", label: "In Progress" },
-  { value: "review", label: "Review" },
-  { value: "done", label: "Done" },
-  { value: "archived", label: "Archived" },
+// Stored values only — the labels come from the dictionary so the data written
+// to the ticket frontmatter never changes with the language.
+const STATUS_VALUES: TicketStatus[] = [
+  "backlog",
+  "in-progress",
+  "review",
+  "done",
+  "archived",
 ];
 
-const PRIORITY_OPTIONS: Array<{ value: TicketPriority; label: string }> = [
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "urgent", label: "Urgent" },
-];
+const PRIORITY_VALUES: TicketPriority[] = ["low", "medium", "high", "urgent"];
 
 interface FormState {
   title: string;
@@ -63,6 +61,7 @@ const EMPTY: FormState = {
 };
 
 export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketModalProps) {
+  const { t } = useI18n();
   const [state, setState] = useState<FormState>(EMPTY);
   const [saving, setSaving] = useState(false);
   const [linkInput, setLinkInput] = useState("");
@@ -102,7 +101,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
   const handleSave = async () => {
     const title = state.title.trim();
     if (title.length === 0) {
-      pushToast("Title is required", "error");
+      pushToast(t.tickets.titleRequired, "error");
       return;
     }
     const input: CreateTicketInput = {
@@ -117,15 +116,15 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
     try {
       if (mode === "create") {
         await create(input);
-        pushToast("Ticket created", "success");
+        pushToast(t.tickets.created, "success");
       } else if (ticket) {
         await update(ticket.filename, input);
-        pushToast("Ticket updated", "success");
+        pushToast(t.tickets.updated, "success");
       }
       onClose();
     } catch (e) {
       pushToast(
-        `Error saving: ${e instanceof Error ? e.message : String(e)}`,
+        t.tickets.saveError(e instanceof Error ? e.message : String(e)),
         "error",
       );
     } finally {
@@ -143,7 +142,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
       setLinkInput("");
     } catch (e) {
       pushToast(
-        `Could not link: ${e instanceof Error ? e.message : String(e)}`,
+        t.tickets.linkError(e instanceof Error ? e.message : String(e)),
         "error",
       );
     } finally {
@@ -158,7 +157,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
       await unlinkTickets(ticket.id, target);
     } catch (e) {
       pushToast(
-        `Could not unlink: ${e instanceof Error ? e.message : String(e)}`,
+        t.tickets.unlinkError(e instanceof Error ? e.message : String(e)),
         "error",
       );
     } finally {
@@ -172,7 +171,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
     <Modal
       open={open}
       onClose={onClose}
-      title={mode === "create" ? "New ticket" : ticket ? `Edit ${ticket.id}` : "Edit ticket"}
+      title={mode === "create" ? t.tickets.newTicket : ticket ? t.tickets.editTicketId(ticket.id) : t.tickets.editTicket}
       footer={
         <>
           {mode === "edit" && ticket ? (
@@ -180,67 +179,67 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
               <CopyForAIButton filename={ticket.filename} />
               {onDelete ? (
                 <Button variant="ghost" onClick={onDelete} disabled={saving}>
-                  Delete
+                  {t.common.delete}
                 </Button>
               ) : null}
             </div>
           ) : null}
           <Button variant="ghost" onClick={onClose} disabled={saving}>
-            Cancel
+            {t.common.cancel}
           </Button>
           <Button variant="primary" onClick={handleSave} disabled={saving}>
-            {saving ? "Saving…" : "Save"}
+            {saving ? t.tickets.saving : t.common.save}
           </Button>
         </>
       }
     >
       <Input
-        label="Title"
+        label={t.tickets.title}
         value={state.title}
         onChange={(e) => updateField("title", e.currentTarget.value)}
-        placeholder="Short, action-oriented summary"
+        placeholder={t.tickets.titlePlaceholder}
         autoFocus
       />
       <div className="gap-3" style={gridStyle}>
         <Select
-          label="Status"
+          label={t.tickets.statusLabel}
           value={state.status}
           onChange={(e) =>
             updateField("status", e.currentTarget.value as TicketStatus)
           }
         >
-          {STATUS_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
+          {STATUS_VALUES.map((value) => (
+            <option key={value} value={value}>
+              {t.tickets.status[value]}
             </option>
           ))}
         </Select>
         <Select
-          label="Priority"
+          label={t.tickets.priorityLabel}
           value={state.priority}
           onChange={(e) =>
             updateField("priority", e.currentTarget.value as TicketPriority)
           }
         >
-          {PRIORITY_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
+          {PRIORITY_VALUES.map((value) => (
+            <option key={value} value={value}>
+              {t.tickets.priority[value]}
             </option>
           ))}
         </Select>
       </div>
       <div className="gap-3" style={gridStyle}>
         <Input
-          label="Assignee"
+          label={t.tickets.assignee}
           value={state.assignee}
           onChange={(e) => updateField("assignee", e.currentTarget.value)}
-          placeholder="username (optional)"
+          placeholder={t.tickets.assigneePlaceholder}
         />
         <Input
-          label="Tags"
+          label={t.tickets.tags}
           value={state.tags}
           onChange={(e) => updateField("tags", e.currentTarget.value)}
-          placeholder="comma, separated"
+          placeholder={t.tickets.tagsPlaceholder}
         />
       </div>
       {mode === "edit" && ticket ? (
@@ -249,12 +248,12 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
             className="text-fg-muted text-xs font-medium"
             style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}
           >
-            Linked tickets
+            {t.tickets.linkedTickets}
           </span>
           <div className="flex flex-wrap items-center gap-2">
             {ticket.links.length === 0 ? (
               <span className="text-fg-subtle text-xs">
-                No links yet — add a TKT id to draw an edge in the graph.
+                {t.tickets.noLinks}
               </span>
             ) : (
               ticket.links.map((link) => (
@@ -263,7 +262,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
                   <button
                     type="button"
                     onClick={() => void handleUnlink(link)}
-                    aria-label={`Unlink ${link}`}
+                    aria-label={t.tickets.unlink(link)}
                     disabled={linkBusy}
                   >
                     <X size={11} />
@@ -283,7 +282,7 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
                   void handleLink();
                 }
               }}
-              placeholder="TKT-1041"
+              placeholder={t.tickets.linkPlaceholder}
               spellCheck={false}
               disabled={linkBusy}
             />
@@ -292,11 +291,11 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
               onClick={() => void handleLink()}
               disabled={linkBusy || linkInput.trim().length === 0}
             >
-              Link
+              {t.tickets.link}
             </Button>
           </div>
           <span className="text-fg-subtle text-xs">
-            Links save immediately — they are what the graph draws.
+            {t.tickets.linksNote}
           </span>
         </div>
       ) : null}
@@ -305,14 +304,14 @@ export function TicketModal({ open, mode, ticket, onClose, onDelete }: TicketMod
           className="text-fg-muted text-xs font-medium"
           style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}
         >
-          Body
+          {t.tickets.body}
         </span>
         <textarea
           className="input font-mono text-sm"
           style={{ minHeight: 180, lineHeight: 1.625, resize: "vertical" }}
           value={state.body}
           onChange={(e) => updateField("body", e.currentTarget.value)}
-          placeholder="Markdown body — context, requirements, acceptance criteria…"
+          placeholder={t.tickets.bodyPlaceholder}
         />
       </label>
     </Modal>

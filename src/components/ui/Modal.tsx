@@ -1,5 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { X } from "lucide-react";
+import { useI18n } from "../../lib/i18n";
 
 interface ModalProps {
   open: boolean;
@@ -12,6 +13,7 @@ interface ModalProps {
 }
 
 export function Modal({ open, onClose, title, children, footer, wide }: ModalProps) {
+  const { t } = useI18n();
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -55,7 +57,7 @@ export function Modal({ open, onClose, title, children, footer, wide }: ModalPro
             type="button"
             className="btn-ghost"
             style={{ padding: 4 }}
-            aria-label="Close"
+            aria-label={t.common.close}
             onClick={onClose}
           >
             <X size={16} />

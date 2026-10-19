@@ -1053,9 +1053,45 @@ fn init_data_dir() -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
-fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
+/// Whether a Markdown file claims to be a ticket.
+///
+/// GitTeam owns top-level `TKT-…` files, so those always count. A ticket whose
+/// file was renamed keeps working: a frontmatter `id` that starts with `TKT-`
+/// says what the file is, whatever it is called. A README, a note or an
+/// `AGENTS.md` claims nothing, so it is skipped in silence instead of being
+/// reported as a malformed ticket.
+fn claims_to_be_a_ticket(name: &str, content: &str) -> bool {
+    if is_owned_ticket_path(name) {
+        return true;
+    }
+    let mut lines = content.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return false;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return false;
+        }
+        if let Some(value) = trimmed.strip_prefix("id:") {
+            let value = value
+                .trim_start()
+                .trim_start_matches(|c| c == '"' || c == '\'');
+            return value.starts_with("TKT-");
+        }
+    }
+    false
+}
+
+/// Every `.md` file in `dir` that the scan treats as a ticket candidate.
+///
+/// GitTeam owns top-level ticket files and nothing else — see
+/// `is_owned_ticket_path` and `claims_to_be_a_ticket` — so a README, a note or
+/// a nested document is ordinary repository content, not a broken ticket, and
+/// produces no warning.
+fn ticket_scan_candidates(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("read_dir failed: {}", e))?;
-    let mut tickets = vec![];
+    let mut candidates = vec![];
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -1064,6 +1100,24 @@ fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if !claims_to_be_a_ticket(name, &content) {
+            continue;
+        }
+        candidates.push(path);
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
+    let mut tickets = vec![];
+    for path in ticket_scan_candidates(dir)? {
         match parse_ticket_file(&path) {
             Ok(t) => {
                 if t.id.starts_with("TKT-") {
@@ -3928,6 +3982,57 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         assert!(parsed.links.is_empty());
         assert_eq!(parsed.title, "Legacy");
         let _ = fs::remove_file(&path);
+    }
+
+    /// A tickets repository also holds notes and documentation. Those files are
+    /// not broken tickets, so the scan must neither parse them nor warn about
+    /// them.
+    #[test]
+    fn the_scan_only_looks_at_files_the_app_owns() {
+        let dir = temp_path("scan");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("notes")).unwrap();
+
+        fs::write(
+            dir.join("TKT-1000-real.md"),
+            render_frontmatter(&sample_ticket(vec![])),
+        )
+        .unwrap();
+        fs::write(dir.join("README.md"), "# Board\n\nNotes live here.\n").unwrap();
+        fs::write(dir.join("AGENTS.md"), "---\ntitle: agents\n---\n").unwrap();
+        fs::write(
+            dir.join("ticket-1001-manual.md"),
+            "---\nid: NOTES-1\ntitle: manual\n---\n",
+        )
+        .unwrap();
+        // A complete ticket whose file was renamed: it must stay listed.
+        fs::write(
+            dir.join("board-notes.md"),
+            render_frontmatter(&ticket_with("TKT-1001", &[])),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("notes").join("TKT-1002-nested.md"),
+            render_frontmatter(&ticket_with("TKT-1002", &[])),
+        )
+        .unwrap();
+
+        let names: Vec<String> = ticket_scan_candidates(&dir)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["TKT-1000-real.md".to_string(), "board-notes.md".to_string()],
+            "owned files and renamed tickets are candidates, documentation is not"
+        );
+
+        let tickets = load_all_tickets(&dir).unwrap();
+        let mut ids: Vec<&str> = tickets.iter().map(|t| t.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["TKT-1001", "TKT-1041"], "a renamed ticket must not vanish");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

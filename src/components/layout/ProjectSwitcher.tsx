@@ -9,6 +9,7 @@ import { ChevronDown, Plus, Search, UserPlus } from "lucide-react";
 import { useTicketsStore } from "../../store/tickets";
 import type { Project, SyncStatus } from "../../types/git";
 import { pushToast } from "../../lib/toast";
+import { useI18n } from "../../lib/i18n";
 import { InviteBoardModal } from "./InviteBoardModal";
 
 /**
@@ -25,6 +26,8 @@ export function ProjectSwitcher() {
   const activeProject = useTicketsStore((s) => s.activeProject);
   const syncStatus = useTicketsStore((s) => s.syncStatus);
   const switchProject = useTicketsStore((s) => s.switchProject);
+
+  const { t } = useI18n();
 
   const [open, setOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -82,6 +85,7 @@ export function ProjectSwitcher() {
   }, [projects, filter]);
 
   const dot = SYNC_DOT[syncStatus];
+  const dotLabel = t.projects.sync[syncStatus];
 
   const handleSelect = async (p: Project) => {
     if (p.id === activeProject?.id) {
@@ -91,10 +95,10 @@ export function ProjectSwitcher() {
     setOpen(false);
     try {
       await switchProject(p.id);
-      pushToast(`Switched to ${p.name}`, "success");
+      pushToast(t.projects.switchedTo(p.name), "success");
     } catch (e) {
       pushToast(
-        `Could not switch: ${e instanceof Error ? e.message : String(e)}`,
+        t.projects.couldNotSwitch(e instanceof Error ? e.message : String(e)),
         "error",
       );
     }
@@ -123,10 +127,10 @@ export function ProjectSwitcher() {
           type="button"
           className="btn-outline"
           onClick={handleLinkNew}
-          aria-label="Link a repository"
+          aria-label={t.projects.linkARepository}
         >
           <Plus size={14} />
-          <span>Link repository</span>
+          <span>{t.projects.linkRepository}</span>
         </button>
       </div>
     );
@@ -144,7 +148,7 @@ export function ProjectSwitcher() {
         onKeyDown={handlePillKey}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Project: ${activeProject.name}`}
+        aria-label={t.projects.projectLabel(activeProject.name)}
       >
         <Monogram text={mono} />
         <span className="font-mono font-semibold text-fg whitespace-nowrap">
@@ -165,8 +169,8 @@ export function ProjectSwitcher() {
           {repo}
         </span>
         <span
-          aria-label={dot.label}
-          title={dot.label}
+          aria-label={dotLabel}
+          title={dotLabel}
           className="status-dot"
           style={{ background: dot.color }}
         />
@@ -176,7 +180,7 @@ export function ProjectSwitcher() {
       {open ? (
         <div
           role="menu"
-          aria-label="Switch project"
+          aria-label={t.projects.switchProject}
           className="card animate-paletteIn flex flex-col"
           style={{
             position: "absolute",
@@ -202,13 +206,13 @@ export function ProjectSwitcher() {
               className="text-fg-subtle font-medium uppercase"
               style={{ fontSize: 11, letterSpacing: "0.04em" }}
             >
-              Switch project
+              {t.projects.switchProject}
             </span>
             <span
               className="font-mono text-fg-subtle"
               style={{ fontSize: 11 }}
             >
-              {projects.length} linked
+              {t.projects.linked(projects.length)}
             </span>
           </div>
 
@@ -224,8 +228,8 @@ export function ProjectSwitcher() {
                 type="text"
                 value={filter}
                 onChange={(e) => setFilter(e.currentTarget.value)}
-                placeholder="Filter projects…"
-                aria-label="Filter projects"
+                placeholder={t.projects.filterPlaceholder}
+                aria-label={t.projects.filterLabel}
                 className="palette-input"
                 style={{ padding: 0 }}
               />
@@ -242,7 +246,7 @@ export function ProjectSwitcher() {
                 className="text-center text-fg-muted"
                 style={{ padding: "24px 12px", fontSize: "var(--text-sm)" }}
               >
-                {filter ? "No projects match." : "No projects yet."}
+                {filter ? t.projects.noMatches : t.projects.noneYet}
               </div>
             ) : (
               filteredProjects.map((p) => {
@@ -296,7 +300,7 @@ export function ProjectSwitcher() {
                               letterSpacing: "0.04em",
                             }}
                           >
-                            current
+                            {t.projects.current}
                           </span>
                         ) : null}
                       </div>
@@ -314,8 +318,8 @@ export function ProjectSwitcher() {
                     {/* TODO(per-project-sync): read the dot color from a
                         per-project sync map once the backend exposes one. */}
                     <span
-                      aria-label={dot.label}
-                      title={dot.label}
+                      aria-label={dotLabel}
+                      title={dotLabel}
                       className="status-dot shrink-0"
                       style={{ background: dot.color }}
                     />
@@ -362,7 +366,7 @@ export function ProjectSwitcher() {
               }}
             >
               <UserPlus size={14} />
-              Invite someone
+              {t.projects.inviteSomeone}
             </button>
             <button
               type="button"
@@ -393,7 +397,7 @@ export function ProjectSwitcher() {
                 style={{ gap: 8 }}
               >
                 <Plus size={14} />
-                Link new repository
+                {t.projects.linkNewRepository}
               </span>
               <span className="kbd">⌘N</span>
             </button>
@@ -404,7 +408,7 @@ export function ProjectSwitcher() {
       <InviteBoardModal
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
-        board={activeProject?.name ?? "this board"}
+        board={activeProject?.name ?? t.projects.thisBoard}
       />
     </div>
   );
@@ -462,26 +466,12 @@ function repoName(repoUrl: string): string {
   return trimmed.slice(lastSlash + 1);
 }
 
-/* Color + label for the global sync dot. */
-const SYNC_DOT: Record<SyncStatus, { color: string; label: string }> = {
-  unconfigured: {
-    color: "var(--status-backlog)",
-    label: "Not configured",
-  },
-  syncing: {
-    color: "var(--status-progress)",
-    label: "Syncing…",
-  },
-  synced: {
-    color: "var(--status-done)",
-    label: "Synced",
-  },
-  error: {
-    color: "var(--priority-urgent)",
-    label: "Sync error",
-  },
-  conflict: {
-    color: "var(--priority-urgent)",
-    label: "Conflict",
-  },
+/* Color for the global sync dot. The label comes from the dictionary at render
+ * time, not from here: the language can change while the app is running. */
+const SYNC_DOT: Record<SyncStatus, { color: string }> = {
+  unconfigured: { color: "var(--status-backlog)" },
+  syncing: { color: "var(--status-progress)" },
+  synced: { color: "var(--status-done)" },
+  error: { color: "var(--priority-urgent)" },
+  conflict: { color: "var(--priority-urgent)" },
 };

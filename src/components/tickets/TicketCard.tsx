@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Ticket, TicketPriority } from "../../types/ticket";
+import { useI18n } from "../../lib/i18n";
 import { CopyForAIButton } from "./CopyForAIButton";
 
 const priorityClass: Record<TicketPriority, string> = {
@@ -15,6 +16,7 @@ interface TicketCardProps {
 }
 
 export function TicketCard({ ticket, onClick }: TicketCardProps) {
+  const { t } = useI18n();
   const [dragging, setDragging] = useState(false);
   const [copyHint, setCopyHint] = useState(false);
 
@@ -60,8 +62,8 @@ export function TicketCard({ ticket, onClick }: TicketCardProps) {
         <button
           type="button"
           onClick={handleYank}
-          title="Copy ticket ID (Y)"
-          aria-label={`Copy ticket ID ${ticket.id}`}
+          title={t.tickets.copyTicketId}
+          aria-label={t.tickets.copyTicketIdAria(ticket.id)}
           className="shrink-0 inline-flex items-center justify-center font-mono"
           // The button is always visible to keep keyboard / SR access predictable;
           // on hover the bg shifts to accent and the label flips to confirm the copy.

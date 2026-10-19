@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTicketsStore } from "../../store/tickets";
+import { useI18n } from "../../lib/i18n";
 import { pushToast } from "../../lib/toast";
 import type { Ticket, TicketStatus } from "../../types/ticket";
 import { TicketCard } from "./TicketCard";
@@ -13,6 +14,7 @@ interface ColumnProps {
 }
 
 export function Column({ status, label, dotClass, tickets, onSelect }: ColumnProps) {
+  const { t } = useI18n();
   const [dragOver, setDragOver] = useState(false);
   const update = useTicketsStore((s) => s.update);
 
@@ -48,7 +50,7 @@ export function Column({ status, label, dotClass, tickets, onSelect }: ColumnPro
       });
     } catch (err) {
       pushToast(
-        `Could not move ticket: ${err instanceof Error ? err.message : String(err)}`,
+        t.tickets.moveError(err instanceof Error ? err.message : String(err)),
         "error",
       );
     }
@@ -84,7 +86,7 @@ export function Column({ status, label, dotClass, tickets, onSelect }: ColumnPro
             className="text-fg-subtle text-xs text-center py-6"
             style={{ fontStyle: "italic" }}
           >
-            No tickets here
+            {t.tickets.noTickets}
           </p>
         ) : (
           tickets.map((t) => (

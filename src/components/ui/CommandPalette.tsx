@@ -14,18 +14,7 @@ import {
 import { useTicketsStore } from "../../store/tickets";
 import type { TicketStatus } from "../../types/ticket";
 import { pushToast } from "../../lib/toast";
-
-const STATUS_FILTERS: Array<{
-  value: "all" | TicketStatus;
-  label: string;
-  icon: typeof Inbox;
-}> = [
-  { value: "all", label: "Show all tickets", icon: ListTodo },
-  { value: "backlog", label: "Show backlog", icon: Inbox },
-  { value: "in-progress", label: "Show in progress", icon: CircleArrowRight },
-  { value: "review", label: "Show review", icon: ScrollText },
-  { value: "done", label: "Show done", icon: ListChecks },
-];
+import { useI18n } from "../../lib/i18n";
 
 interface CommandPaletteProps {
   /** Called when the user picks "Create new ticket" or a ticket to edit. */
@@ -37,6 +26,7 @@ export function CommandPalette({
   onCreateTicket,
   onEditTicket,
 }: CommandPaletteProps) {
+  const { t } = useI18n();
   const open = useTicketsStore((s) => s.paletteOpen);
   const closePalette = useTicketsStore((s) => s.closePalette);
   const tickets = useTicketsStore((s) => s.tickets);
@@ -67,14 +57,28 @@ export function CommandPalette({
 
   const hasGitConfig = gitConfig !== null;
 
+  // The filter labels are also the palette's search terms, so they follow the
+  // language the user sees.
+  const statusFilters: Array<{
+    value: "all" | TicketStatus;
+    label: string;
+    icon: typeof Inbox;
+  }> = [
+    { value: "all", label: t.layout.showAllTickets, icon: ListTodo },
+    { value: "backlog", label: t.layout.showBacklog, icon: Inbox },
+    { value: "in-progress", label: t.layout.showInProgress, icon: CircleArrowRight },
+    { value: "review", label: t.layout.showReview, icon: ScrollText },
+    { value: "done", label: t.layout.showDone, icon: ListChecks },
+  ];
+
   const filteredTickets = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return tickets;
-    return tickets.filter((t) => {
-      if (t.id.toLowerCase().includes(q)) return true;
-      if (t.title.toLowerCase().includes(q)) return true;
-      if (t.assignee && t.assignee.toLowerCase().includes(q)) return true;
-      for (const tag of t.tags) {
+    return tickets.filter((ticket) => {
+      if (ticket.id.toLowerCase().includes(q)) return true;
+      if (ticket.title.toLowerCase().includes(q)) return true;
+      if (ticket.assignee && ticket.assignee.toLowerCase().includes(q)) return true;
+      for (const tag of ticket.tags) {
         if (tag.toLowerCase().includes(q)) return true;
       }
       return false;
@@ -103,7 +107,7 @@ export function CommandPalette({
       }}
     >
       <Command
-        label="Global command palette"
+        label={t.layout.paletteLabel}
         className="rounded-lg border bg-bg-elevated overflow-hidden animate-paletteIn"
         style={{ width: 640, maxWidth: "92vw", boxShadow: "var(--shadow-elevated)" }}
       >
@@ -112,7 +116,7 @@ export function CommandPalette({
             autoFocus
             value={query}
             onValueChange={setQuery}
-            placeholder="Type a command or search tickets…"
+            placeholder={t.layout.palettePlaceholder}
             className="palette-input"
           />
           <span className="kbd">Esc</span>
@@ -122,10 +126,10 @@ export function CommandPalette({
           style={{ maxHeight: 480 }}
         >
           <Command.Empty className="px-3 py-6 text-center text-sm text-fg-muted">
-            No matches.
+            {t.layout.paletteNoMatches}
           </Command.Empty>
 
-          <Command.Group heading="Actions" className="palette-group">
+          <Command.Group heading={t.layout.paletteActions} className="palette-group">
             <Command.Item
               value="create new ticket"
               onSelect={() => {
@@ -135,7 +139,7 @@ export function CommandPalette({
               className="palette-item"
             >
               <Sparkles size={14} className="text-fg-muted" />
-              Create new ticket
+              {t.layout.createNewTicket}
             </Command.Item>
             {hasGitConfig ? (
               <Command.Item
@@ -147,10 +151,10 @@ export function CommandPalette({
                 className="palette-item"
               >
                 <RefreshCw size={14} className="text-fg-muted" />
-                Sync now
+                {t.layout.syncNow}
               </Command.Item>
             ) : null}
-            {STATUS_FILTERS.map((f) => {
+            {statusFilters.map((f) => {
               const Icon = f.icon;
               return (
                 <Command.Item
@@ -171,31 +175,31 @@ export function CommandPalette({
 
           <Command.Separator style={separatorStyle} />
 
-          <Command.Group heading="Tickets" className="palette-group">
-            {filteredTickets.map((t) => {
+          <Command.Group heading={t.layout.paletteTickets} className="palette-group">
+            {filteredTickets.map((ticket) => {
               const tagLabel =
-                t.tags.length > 0 ? ` ${t.tags.join(" ")}` : "";
+                ticket.tags.length > 0 ? ` ${ticket.tags.join(" ")}` : "";
               return (
                 <Command.Item
-                  key={t.filename}
-                  value={`${t.id} ${t.title} ${t.assignee ?? ""}${tagLabel}`}
+                  key={ticket.filename}
+                  value={`${ticket.id} ${ticket.title} ${ticket.assignee ?? ""}${tagLabel}`}
                   onSelect={() => {
                     closePalette();
-                    onEditTicket(t.filename);
+                    onEditTicket(ticket.filename);
                   }}
                   className="palette-item"
                 >
                   <Tag size={14} className="text-fg-muted shrink-0" />
                   <span className="font-mono text-xs text-fg-muted shrink-0">
-                    {t.id}
+                    {ticket.id}
                   </span>
-                  <span className="text-sm text-fg truncate">{t.title}</span>
-                  {t.tags.length > 0 ? (
+                  <span className="text-sm text-fg truncate">{ticket.title}</span>
+                  {ticket.tags.length > 0 ? (
                     <span
                       className="text-fg-subtle shrink-0"
                       style={{ fontSize: 11 }}
                     >
-                      {t.tags
+                      {ticket.tags
                         .slice(0, 3)
                         .map((tag) => `#${tag}`)
                         .join(" ")}
@@ -209,18 +213,18 @@ export function CommandPalette({
           {hasGitConfig ? (
             <>
               <Command.Separator style={separatorStyle} />
-              <Command.Group heading="Settings" className="palette-group">
+              <Command.Group heading={t.layout.paletteSettings} className="palette-group">
                 <Command.Item
                   value="disconnect repository"
                   onSelect={() => {
                     closePalette();
-                    pushToast("Disconnecting…", "default");
+                    pushToast(t.layout.disconnecting, "default");
                     void removeActiveProject();
                   }}
                   className="palette-item"
                 >
                   <Plug size={14} className="text-fg-muted" />
-                  Disconnect repository
+                  {t.layout.disconnectRepository}
                 </Command.Item>
               </Command.Group>
             </>

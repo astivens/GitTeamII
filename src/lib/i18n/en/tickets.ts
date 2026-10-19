@@ -1,0 +1,60 @@
+/**
+ * Ticket domain: modal, card, board and the "Copy for AI" action.
+ *
+ * `status` and `priority` are label maps keyed by the stored value: the keys are
+ * the data written to the ticket frontmatter and must never be translated, only
+ * the labels are.
+ */
+export const tickets = {
+  status: {
+    backlog: "Backlog",
+    "in-progress": "In Progress",
+    review: "Review",
+    done: "Done",
+    archived: "Archived",
+  },
+  priority: {
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    urgent: "Urgent",
+  },
+  newTicket: "New ticket",
+  editTicket: "Edit ticket",
+  editTicketId: (id: string) => `Edit ${id}`,
+  saving: "Saving…",
+  title: "Title",
+  titlePlaceholder: "Short, action-oriented summary",
+  titleRequired: "Title is required",
+  statusLabel: "Status",
+  priorityLabel: "Priority",
+  assignee: "Assignee",
+  assigneePlaceholder: "username (optional)",
+  tags: "Tags",
+  tagsPlaceholder: "comma, separated",
+  body: "Body",
+  bodyPlaceholder: "Markdown body — context, requirements, acceptance criteria…",
+  linkedTickets: "Linked tickets",
+  noLinks: "No links yet — add a TKT id to draw an edge in the graph.",
+  unlink: (id: string) => `Unlink ${id}`,
+  linkPlaceholder: "TKT-1041",
+  link: "Link",
+  linksNote: "Links save immediately — they are what the graph draws.",
+  created: "Ticket created",
+  updated: "Ticket updated",
+  saveError: (detail: string) => `Error saving: ${detail}`,
+  linkError: (detail: string) => `Could not link: ${detail}`,
+  unlinkError: (detail: string) => `Could not unlink: ${detail}`,
+  moveError: (detail: string) => `Could not move ticket: ${detail}`,
+  noTickets: "No tickets here",
+  showing: "Showing:",
+  clearFilter: "Clear filter",
+  copyForAi: "Copy for AI",
+  copyForAiShort: "AI",
+  copyForAiTitle: "Copy full ticket markdown for AI context",
+  copyForAiAria: "Copy ticket markdown for AI",
+  copiedContext: "Context copied to clipboard",
+  copyError: (detail: string) => `Error copying: ${detail}`,
+  copyTicketId: "Copy ticket ID (Y)",
+  copyTicketIdAria: (id: string) => `Copy ticket ID ${id}`,
+};
