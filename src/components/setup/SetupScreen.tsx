@@ -33,7 +33,13 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
   const [boardName, setBoardName] = useState("");
   const [inviteLink, setInviteLink] = useState("");
   const [invite, setInvite] = useState<InviteDetails | null>(null);
-  const [pending, setPending] = useState<PendingInvitation | null>(null);
+  // La invitación viaja junto al destino por el que se preguntó: aceptarla tiene
+  // que reintentar *ese* destino, y en conectar no hay link parseado del que
+  // sacarlo. Sin esto, el botón existía en pantalla y no hacía nada.
+  const [pending, setPending] = useState<{
+    invitation: PendingInvitation;
+    target: string;
+  } | null>(null);
   const [pat, setPat] = useState("");
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
@@ -93,7 +99,7 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
       setError(test.error ?? "Could not connect to the repository.");
       try {
         const [invitation] = await api.githubPendingInvitations(token, target);
-        setPending(invitation ?? null);
+        setPending(invitation ? { invitation, target } : null);
       } catch {
         // If GitHub cannot be asked, the clone error stands: nothing is invented.
         setPending(null);
@@ -111,15 +117,16 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
   };
 
   const acceptPending = async () => {
-    if (!pending || !invite) return;
+    if (!pending) return;
     setError(null);
     setBusy(true);
     try {
-      await api.githubAcceptInvitation(pat.trim(), pending.id);
+      await api.githubAcceptInvitation(pat.trim(), pending.invitation.id);
+      const target = pending.target;
       setPending(null);
       pushToast("Invitation accepted", "success");
       await joinBoard(
-        invite.repo_url,
+        target,
         pat.trim(),
         userName.trim(),
         userEmail.trim(),
@@ -440,9 +447,11 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
             >
               <p className="text-fg">
                 GitHub is holding an invitation for you on{" "}
-                <span className="font-mono">{pending.repo}</span>
-                {pending.from ? <> · sent by {pending.from}</> : null}. A private
-                board clones once it is accepted.
+                <span className="font-mono">{pending.invitation.repo}</span>
+                {pending.invitation.from ? (
+                  <> · sent by {pending.invitation.from}</>
+                ) : null}
+                . A private board clones once it is accepted.
               </p>
               <Button
                 type="button"
