@@ -2918,10 +2918,21 @@ fn github_api_error(status: u16, oauth_scopes: Option<&str>, body: &str) -> Stri
     let has_repo_scope = scopes.split(',').any(|s| s.trim() == "repo");
     match status {
         401 => "GitHub rejected the token. It may be expired or revoked: create a new one and try again.".to_string(),
-        403 | 404 if !has_repo_scope => format!(
-            "Your GitHub token is missing the `repo` scope, which is required to create a repository. Scopes it has: {}.",
-            if scopes.is_empty() { "none" } else { scopes }
-        ),
+        403 | 404 if !has_repo_scope => {
+            // An absent header is normal for a fine-grained token, so "no
+            // scopes" must not be read as "no permissions": say what is needed
+            // instead of asserting what the token has.
+            let explanation = if scopes.is_empty() {
+                "GitHub reported no scopes for this token, which is normal for a fine-grained token. Creating a repository needs permission to create repositories; a classic token is missing the `repo` scope otherwise."
+            } else {
+                "The token is missing the `repo` scope, which is required to create a repository."
+            };
+            format!(
+                "{} Scopes it has: {}.",
+                explanation,
+                if scopes.is_empty() { "none" } else { scopes }
+            )
+        }
         403 => "GitHub refused the request: this token's permissions do not allow creating a repository.".to_string(),
         422 => format!(
             "GitHub rejected the repository: {}.",
@@ -2969,6 +2980,17 @@ fn choose_git_identity(
     Ok((name, email))
 }
 
+/// The body of the create-repository call. It is its own function so the two
+/// promises that matter here — the board is **private**, and it carries an
+/// initial commit — are pinned by a test instead of only by a literal.
+fn board_create_body(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "private": true,
+        "auto_init": true,
+    })
+}
+
 /// Creates a private repository on GitHub and returns its clone url.
 ///
 /// `auto_init` matters: an empty repository has no default branch, and the
@@ -2983,12 +3005,7 @@ async fn github_create_repo(pat: &str, name: &str) -> Result<String, GithubError
         .build()
         .map_err(|e| fatal(format!("could not start the HTTP client: {}", e)))?;
 
-    let body = serde_json::json!({
-        "name": name,
-        "private": true,
-        "auto_init": true,
-    })
-    .to_string();
+    let body = board_create_body(name).to_string();
 
     let response = client
         .post("https://api.github.com/user/repos")
@@ -4657,5 +4674,51 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             ("Typed".to_string(), "typed@example.com".to_string())
         );
         assert!(choose_git_identity(None, None, None).is_err());
+    }
+
+    #[test]
+    fn a_board_is_created_private_and_with_an_initial_commit() {
+        let body = board_create_body("royero-labs-board");
+        assert_eq!(body["name"], "royero-labs-board");
+        assert_eq!(
+            body["private"], true,
+            "a board is private unless the user decides otherwise"
+        );
+        assert_eq!(
+            body["auto_init"], true,
+            "an empty repository has no branch for the clone to check out"
+        );
+    }
+
+    #[test]
+    fn a_missing_scope_header_is_still_reported_as_a_missing_repo_scope() {
+        // The header is absent for fine-grained tokens, so its absence must
+        // still lead with the scope problem instead of a bare 403.
+        let absent = github_api_error(403, None, "{}");
+        assert!(absent.contains("`repo`"), "{}", absent);
+        assert!(absent.contains("none"), "{}", absent);
+
+        // With the scope present there is no scope story to tell.
+        let present = github_api_error(404, Some("repo"), "{}");
+        assert!(!present.contains("missing"), "{}", present);
+    }
+
+    #[test]
+    fn the_repo_scope_is_an_exact_list_member() {
+        // A scope that merely contains "repo" is not the scope.
+        for value in ["repo", "repo,workflow", "workflow, repo ", "public_repo,repo"] {
+            let message = github_api_error(403, Some(value), "{}");
+            assert!(message.contains("permissions"), "{:?} -> {}", value, message);
+        }
+        for value in ["repo_deployment", "public_repo", "repo:status"] {
+            let message = github_api_error(403, Some(value), "{}");
+            assert!(message.contains("missing"), "{:?} -> {}", value, message);
+        }
+    }
+
+    #[test]
+    fn the_candidate_list_always_offers_the_base_name() {
+        assert_eq!(board_name_candidates("b", 0), vec!["b"]);
+        assert_eq!(board_name_candidates("b", 2).len(), 2);
     }
 }

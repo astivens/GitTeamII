@@ -36,10 +36,11 @@ keyring = { version = "3", features = ["linux-native", "apple-native", "windows-
 tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-thread", "time"] }
 # Already in the dependency graph via tauri, but with no TLS backend: the app
 # itself never spoke HTTPS, git does that. Creating a board has to call the
-# GitHub API, so this promotes the crate and adds rustls as the only new
-# crates. rustls uses the aws-lc-rs provider, which compiles a C library and
-# therefore needs cmake and a C toolchain to build (Linux already needs both for
-# tauri). Unlike native-tls, it does not want the system OpenSSL headers.
+# GitHub API, so this promotes the crate and brings in rustls as the TLS stack
+# (hyper-rustls, tokio-rustls, rustls-platform-verifier, aws-lc-rs). It trusts
+# the platform certificate store, so no system OpenSSL headers are involved —
+# but aws-lc-rs compiles a C library, so building wants cmake and a C toolchain
+# (Linux already needs both for tauri).
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 
