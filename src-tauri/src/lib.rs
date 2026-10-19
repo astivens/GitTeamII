@@ -1053,11 +1053,42 @@ fn init_data_dir() -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// Whether a Markdown file claims to be a ticket.
+///
+/// GitTeam owns top-level `TKT-…` files, so those always count. A ticket whose
+/// file was renamed keeps working: a frontmatter `id` that starts with `TKT-`
+/// says what the file is, whatever it is called. A README, a note or an
+/// `AGENTS.md` claims nothing, so it is skipped in silence instead of being
+/// reported as a malformed ticket.
+fn claims_to_be_a_ticket(name: &str, content: &str) -> bool {
+    if is_owned_ticket_path(name) {
+        return true;
+    }
+    let mut lines = content.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return false;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return false;
+        }
+        if let Some(value) = trimmed.strip_prefix("id:") {
+            let value = value
+                .trim_start()
+                .trim_start_matches(|c| c == '"' || c == '\'');
+            return value.starts_with("TKT-");
+        }
+    }
+    false
+}
+
 /// Every `.md` file in `dir` that the scan treats as a ticket candidate.
 ///
 /// GitTeam owns top-level ticket files and nothing else — see
-/// `is_owned_ticket_path` — so a README, a note or a nested document is
-/// ordinary repository content, not a broken ticket, and produces no warning.
+/// `is_owned_ticket_path` and `claims_to_be_a_ticket` — so a README, a note or
+/// a nested document is ordinary repository content, not a broken ticket, and
+/// produces no warning.
 fn ticket_scan_candidates(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("read_dir failed: {}", e))?;
     let mut candidates = vec![];
@@ -1072,10 +1103,10 @@ fn ticket_scan_candidates(dir: &Path) -> Result<Vec<PathBuf>, String> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // One predicate decides what GitTeam owns, for the scan as well as for
-        // staging: anything else in the repository belongs to whoever else uses
-        // it and is skipped without a word.
-        if !is_owned_ticket_path(name) {
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if !claims_to_be_a_ticket(name, &content) {
             continue;
         }
         candidates.push(path);
@@ -3971,7 +4002,13 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         fs::write(dir.join("AGENTS.md"), "---\ntitle: agents\n---\n").unwrap();
         fs::write(
             dir.join("ticket-1001-manual.md"),
-            "---\nid: TKT-1001\ntitle: manual\n---\n",
+            "---\nid: NOTES-1\ntitle: manual\n---\n",
+        )
+        .unwrap();
+        // A complete ticket whose file was renamed: it must stay listed.
+        fs::write(
+            dir.join("board-notes.md"),
+            render_frontmatter(&ticket_with("TKT-1001", &[])),
         )
         .unwrap();
         fs::write(
@@ -3985,11 +4022,16 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names, vec!["TKT-1000-real.md".to_string()]);
+        assert_eq!(
+            names,
+            vec!["TKT-1000-real.md".to_string(), "board-notes.md".to_string()],
+            "owned files and renamed tickets are candidates, documentation is not"
+        );
 
         let tickets = load_all_tickets(&dir).unwrap();
-        assert_eq!(tickets.len(), 1, "only the owned ticket is loaded");
-        assert_eq!(tickets[0].id, "TKT-1041");
+        let mut ids: Vec<&str> = tickets.iter().map(|t| t.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["TKT-1001", "TKT-1041"], "a renamed ticket must not vanish");
         let _ = fs::remove_dir_all(&dir);
     }
 
