@@ -5504,6 +5504,51 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         assert_eq!(intake.not_an_invitation, None);
     }
 
+    // Las cuatro de abajo las escribió la verificación independiente de T6 como
+    // sondas sobre el código de arriba, y se adoptaron tal cual: cubren el mismo
+    // contrato desde el otro lado (orden, repetidos, huecos entre links, y un
+    // escape roto que no se puede aceptar como invitación).
+
+    #[test]
+    fn received_links_first_invitation_wins_in_any_order() {
+        let a = "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git";
+        let b = "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fc%2Fd.git";
+        let intake = classify_received_links(&[b.to_string(), a.to_string()]);
+        assert_eq!(intake.invite.as_deref(), Some(b));
+        assert_eq!(intake.not_an_invitation, None);
+
+        // El mismo link dos veces no cambia nada.
+        let again = classify_received_links(&[a.to_string(), a.to_string()]);
+        assert_eq!(again.invite.as_deref(), Some(a));
+        assert_eq!(again.not_an_invitation, None);
+    }
+
+    #[test]
+    fn received_links_blank_entries_are_skipped_between_links() {
+        let a = "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git";
+        let intake = classify_received_links(&["  ".to_string(), a.to_string(), String::new()]);
+        assert_eq!(intake.invite.as_deref(), Some(a));
+        assert_eq!(intake.not_an_invitation, None);
+    }
+
+    #[test]
+    fn received_links_report_only_the_first_non_invitation() {
+        let intake =
+            classify_received_links(&["gitteam://x".to_string(), "gitteam://y".to_string()]);
+        assert_eq!(intake.invite, None);
+        assert_eq!(intake.not_an_invitation.as_deref(), Some("gitteam://x"));
+    }
+
+    #[test]
+    fn received_links_broken_escape_is_reported_not_accepted() {
+        // Un link que no se puede leer entero no es una invitación a medias: se
+        // informa, igual que en el pegado a mano.
+        let bad = "gitteam://join?repo=%zz&board=b";
+        let intake = classify_received_links(&[bad.to_string()]);
+        assert_eq!(intake.invite, None);
+        assert_eq!(intake.not_an_invitation.as_deref(), Some(bad));
+    }
+
     // ----- T5: el dueño otorga el acceso por @usuario -----
 
     #[test]
