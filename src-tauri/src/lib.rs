@@ -5508,11 +5508,36 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     }
 
     #[test]
+    fn a_403_from_a_token_that_does_not_report_repo_still_names_the_missing_scope() {
+        // La otra mitad de la misma decisión: cuando el token reporta scopes y
+        // el `repo` no está entre ellos, el motivo sí es el scope que falta. Sin
+        // este test, esa rama se podía cambiar por la otra sin que nada cayera
+        // (lo encontró el recheck por mutación).
+        let body = r#"{"message":"Forbidden"}"#;
+        for scopes in [
+            Some("public_repo"),
+            Some("workflow"),
+            Some("repo_deployment"),
+        ] {
+            let message = collaborator_error_message(403, scopes, body, "ana");
+            assert!(message.contains("ana"), "{:?} -> {}", scopes, message);
+            assert!(
+                message.contains("missing the `repo` scope"),
+                "{:?} -> {}",
+                scopes,
+                message
+            );
+            assert!(message.contains("access"), "{:?} -> {}", scopes, message);
+        }
+    }
+
+    #[test]
     fn a_403_from_granting_access_never_reads_as_repository_creation() {
         let body = r#"{"message":"Forbidden"}"#;
         for scopes in [
             None,
             Some(""),
+            Some("   "),
             Some("repo"),
             Some("repo, workflow"),
             Some("public_repo"),

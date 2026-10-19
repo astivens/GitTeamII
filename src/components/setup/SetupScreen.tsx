@@ -279,7 +279,13 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
               label="Repository URL"
               type="text"
               value={url}
-              onChange={(e) => setUrl(e.currentTarget.value)}
+              onChange={(e) => {
+                setUrl(e.currentTarget.value);
+                // La invitación que se ofrecía era para otra dirección: si el
+                // usuario la cambia, la oferta ya no es sobre lo que está en
+                // pantalla.
+                setPending(null);
+              }}
               placeholder="https://github.com/owner/repo.git"
               autoFocus
               autoComplete="off"
