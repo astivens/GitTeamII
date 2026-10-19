@@ -3126,15 +3126,23 @@ pub struct InviteDetails {
 
 const INVITE_PREFIX: &str = "gitteam://join";
 
-/// A repository url as it may appear in an invitation. Only an http(s) url can
-/// carry credentials in a userinfo section: in an ssh address `git@host` is the
-/// address itself, so it is left alone.
+/// A repository url as it may appear in an invitation. In an http(s) url the
+/// userinfo is a credential whatever it holds — a token is written as the user
+/// name — so it always goes. In any other scheme a plain user name is part of
+/// the address (`ssh://git@host`), but a password is a password, so `user:secret@`
+/// goes too. A scp-style `git@host:org/repo.git` has no userinfo section at all
+/// and is left untouched.
 fn invite_repo_url(repo_url: &str) -> String {
     let trimmed = repo_url.trim();
     if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
-        strip_userinfo(trimmed)
-    } else {
-        trimmed.to_string()
+        return strip_userinfo(trimmed);
+    }
+    match trimmed.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('@') {
+            Some((userinfo, host)) if userinfo.contains(':') => format!("{}://{}", scheme, host),
+            _ => trimmed.to_string(),
+        },
+        None => trimmed.to_string(),
     }
 }
 
@@ -4905,14 +4913,27 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     fn a_link_that_is_not_an_invitation_is_rejected_with_a_reason() {
         for text in [
             "",
+            "   ",
             "https://github.com/a/b.git",
             "gitteam://other?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git",
             "gitteam://join",
+            "gitteam://join?",
+            "gitteam://join&repo=x",
+            "gitteam://join?repo",
             "gitteam://join?board=only-a-label",
         ] {
             let error = parse_invite_link(text).expect_err("must be rejected");
             assert!(!error.trim().is_empty(), "{:?} produced no reason", text);
         }
+    }
+
+    #[test]
+    fn a_parameter_a_newer_app_sends_is_ignored_rather_than_fatal() {
+        let parsed = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&scope=board%2Fread",
+        )
+        .expect("an unknown parameter must not break the parse");
+        assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
     }
 
     #[test]
@@ -4929,6 +4950,19 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         )
         .expect("the link is well formed");
         assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
+    }
+
+    #[test]
+    fn a_password_is_stripped_in_any_scheme_but_a_user_name_is_not() {
+        // `ssh://git@host` is an address; `ssh://user:secret@host` carries one.
+        assert_eq!(
+            invite_repo_url("ssh://user:ghp_secret@github.com/a/b.git"),
+            "ssh://github.com/a/b.git"
+        );
+        assert_eq!(
+            invite_repo_url("ssh://git@github.com/a/b.git"),
+            "ssh://git@github.com/a/b.git"
+        );
     }
 
     #[test]
@@ -4954,12 +4988,31 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             "a raw space would cut the link short: {}",
             link
         );
+
+        // The round trip alone cannot catch form decoding, because building
+        // always escapes `+` as %2B and a parser that turned `+` into a space
+        // would still pass it. A hand-written link is what pins the difference.
+        let hand = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=a+b&from=x+y",
+        )
+        .expect("the link is well formed");
+        assert_eq!(hand.board.as_deref(), Some("a+b"));
+        assert_eq!(hand.from.as_deref(), Some("x+y"));
+
+        // Padding is trimmed on purpose: a label is shown to a person, and a
+        // link that travelled through a messenger arrives with whitespace.
+        let padded = parse_invite_link(
+            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=%20%20pad%20%20",
+        )
+        .expect("the link is well formed");
+        assert_eq!(padded.board.as_deref(), Some("pad"));
     }
 
     #[test]
     fn a_broken_escape_is_reported_rather_than_guessed() {
-        assert!(parse_invite_link("gitteam://join?repo=%zz").is_err());
-        assert!(parse_invite_link("gitteam://join?repo=%e2%28%a1").is_err());
-        assert!(parse_invite_link("gitteam://join?repo=%e2").is_err());
+        for bad in ["%zz", "%", "%4", "%e2", "%e2%28%a1", "%FF%FE"] {
+            let link = format!("gitteam://join?repo={}", bad);
+            assert!(parse_invite_link(&link).is_err(), "accepted {:?}", bad);
+        }
     }
 }
