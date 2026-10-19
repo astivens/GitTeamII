@@ -5,8 +5,9 @@ import { Input } from "../ui/Input";
 import { useTicketsStore } from "../../store/tickets";
 import { pushToast } from "../../lib/toast";
 import * as api from "../../lib/tauri";
+import type { InviteDetails } from "../../types/git";
 
-type Mode = "connect" | "create";
+type Mode = "connect" | "create" | "join";
 
 interface SetupScreenProps {
   /** Present when the screen was opened on demand over an already linked board. */
@@ -14,11 +15,13 @@ interface SetupScreenProps {
 }
 
 /**
- * The first screen when there is no project to work on. It offers the two ways
- * a board comes into existence: connecting a repository that already exists,
- * and creating one — a private tickets repository on GitHub. Sharing a board is
- * sharing that repository, which is why a board has its own repository and the
- * one holding the code is never involved.
+ * The first screen when there is no project to work on. It offers the three
+ * ways a board comes into existence: connecting a repository that already
+ * exists, creating one — a private tickets repository on GitHub — and joining
+ * one that somebody invited you to.
+ *
+ * Sharing a board is sharing its repository, which is why a board has a
+ * repository of its own and the one holding the code is never involved.
  */
 export function SetupScreen({ onCancel }: SetupScreenProps) {
   const addProject = useTicketsStore((s) => s.addProject);
@@ -28,6 +31,8 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
   const [mode, setMode] = useState<Mode>("connect");
   const [url, setUrl] = useState("");
   const [boardName, setBoardName] = useState("");
+  const [inviteLink, setInviteLink] = useState("");
+  const [invite, setInvite] = useState<InviteDetails | null>(null);
   const [pat, setPat] = useState("");
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
@@ -38,10 +43,33 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
   // identity, so creating a board can be one click. On first run there is
   // nothing to reuse and the form has to supply them.
   const identityIsInherited = mode === "create" && activeProject !== null;
+  const checkingInvite = mode === "join" && invite === null;
 
   const switchMode = (next: Mode) => {
     setMode(next);
+    // A parsed invitation belongs to the join form alone: leaving it behind
+    // would let it decide where another form clones from.
+    setInvite(null);
     setError(null);
+  };
+
+  const checkInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const trimmed = inviteLink.trim();
+    if (!trimmed) {
+      setError("Paste the invitation link you were sent.");
+      return;
+    }
+    setBusy(true);
+    try {
+      setInvite(await api.boardParseInvite(trimmed));
+    } catch (err) {
+      setInvite(null);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -58,12 +86,21 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
         setError("All fields are required.");
         return;
       }
-    } else if (
-      !identityIsInherited &&
-      (!trimmedPat || !trimmedName || !trimmedEmail)
-    ) {
+    } else if (mode === "create") {
+      if (
+        !identityIsInherited &&
+        (!trimmedPat || !trimmedName || !trimmedEmail)
+      ) {
+        setError(
+          "A token, a git user name and a git user email are required to create the first board.",
+        );
+        return;
+      }
+    } else if (!trimmedPat || !trimmedName || !trimmedEmail) {
+      // Joining is the one path where nothing can be inherited: the credential
+      // is the joiner's own, and there is no board here to take an identity from.
       setError(
-        "A token, a git user name and a git user email are required to create the first board.",
+        "Your own token, name and email are required: a private board clones with your credentials.",
       );
       return;
     }
@@ -79,22 +116,22 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
         });
         pushToast(`Created ${project.name}`, "success");
       } else {
-        const test = await api.gitTestConnection(trimmedUrl, trimmedPat);
+        const target = invite ? invite.repo_url : trimmedUrl;
+        const test = await api.gitTestConnection(target, trimmedPat);
         if (!test.ok) {
           setError(test.error ?? "Could not connect to the repository.");
           return;
         }
         await addProject({
-          url: trimmedUrl,
+          url: target,
           pat: trimmedPat,
           user_name: trimmedName,
           user_email: trimmedEmail,
         });
         pushToast(`Connected to ${test.repo_name}`, "success");
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -114,10 +151,7 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
         </h1>
       </div>
 
-      <div
-        className="w-full flex flex-col gap-3"
-        style={{ maxWidth: 480 }}
-      >
+      <div className="w-full flex flex-col gap-3" style={{ maxWidth: 480 }}>
         <div className="flex gap-2">
           <Button
             type="button"
@@ -135,17 +169,27 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
           >
             Create a board
           </Button>
+          <Button
+            type="button"
+            variant={mode === "join" ? "primary" : "outline"}
+            className="flex-1"
+            onClick={() => switchMode("join")}
+          >
+            Join a board
+          </Button>
         </div>
 
         <form
-          onSubmit={submit}
+          onSubmit={checkingInvite ? checkInvite : submit}
           className="card p-6 flex flex-col gap-4"
         >
           <div className="flex flex-col gap-1">
             <h2 className="text-fg font-medium">
               {mode === "connect"
                 ? "Connect your team's repository"
-                : "Create a board"}
+                : mode === "create"
+                  ? "Create a board"
+                  : "Join a board"}
             </h2>
             <p className="text-fg-muted text-sm">
               {mode === "connect" ? (
@@ -156,11 +200,16 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
                   </code>{" "}
                   and keeps it in sync.
                 </>
-              ) : (
+              ) : mode === "create" ? (
                 <>
                   GitTeam creates a private repository on GitHub that holds only
                   tickets. Sharing a board is sharing that repository, so the
                   repository holding your code is never involved.
+                </>
+              ) : (
+                <>
+                  Paste the invitation you were sent. GitTeam shows you which
+                  board it is for before it clones anything.
                 </>
               )}
             </p>
@@ -177,7 +226,9 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
               autoComplete="off"
               spellCheck={false}
             />
-          ) : (
+          ) : null}
+
+          {mode === "create" ? (
             <Input
               label="Board name"
               type="text"
@@ -190,63 +241,125 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
               autoComplete="off"
               spellCheck={false}
             />
-          )}
-
-          <div className="flex flex-col gap-1">
-            <Input
-              label={
-                identityIsInherited
-                  ? "Personal access token (optional)"
-                  : "Personal access token"
-              }
-              type="password"
-              value={pat}
-              onChange={(e) => setPat(e.currentTarget.value)}
-              placeholder="ghp_…"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <p className="text-fg-subtle text-xs">
-              {identityIsInherited ? (
-                "Leave it empty to reuse the token already saved for this project."
-              ) : (
-                <>
-                  GitHub → Settings → Developer settings → Personal access
-                  tokens (classic, with <code className="font-mono">repo</code>{" "}
-                  scope)
-                </>
-              )}
-            </p>
-          </div>
-
-          <div
-            className="gap-3"
-            style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)" }}
-          >
-            <Input
-              label="Git user name"
-              type="text"
-              value={userName}
-              onChange={(e) => setUserName(e.currentTarget.value)}
-              placeholder="Carlos Dev"
-              autoComplete="off"
-            />
-            <Input
-              label="Git user email"
-              type="email"
-              value={userEmail}
-              onChange={(e) => setUserEmail(e.currentTarget.value)}
-              placeholder="carlos@example.com"
-              autoComplete="off"
-            />
-          </div>
-
-          {identityIsInherited ? (
-            <p className="text-fg-subtle text-xs">
-              Leave the name and email empty to reuse the ones already saved for
-              this project.
-            </p>
           ) : null}
+
+          {mode === "join" ? (
+            <>
+              <Input
+                label="Invitation link"
+                type="text"
+                value={inviteLink}
+                onChange={(e) => {
+                  setInviteLink(e.currentTarget.value);
+                  setInvite(null);
+                }}
+                placeholder="gitteam://join?repo=…"
+                autoFocus
+                autoComplete="off"
+                spellCheck={false}
+              />
+
+              {invite ? (
+                <div
+                  className="card flex flex-col gap-1"
+                  style={{ padding: 12 }}
+                >
+                  <p className="text-fg text-sm">
+                    {invite.board ? (
+                      <>
+                        Board{" "}
+                        <span className="font-mono">{invite.board}</span>
+                      </>
+                    ) : (
+                      "A board"
+                    )}
+                    {invite.from ? <> · invited by {invite.from}</> : null}
+                  </p>
+                  <p
+                    className="text-fg-subtle text-xs font-mono"
+                    style={{ wordBreak: "break-all" }}
+                  >
+                    {invite.repo_url}
+                  </p>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+
+          {checkingInvite ? null : (
+            <>
+              <div className="flex flex-col gap-1">
+                <Input
+                  label={
+                    identityIsInherited
+                      ? "Personal access token (optional)"
+                      : "Personal access token"
+                  }
+                  type="password"
+                  value={pat}
+                  onChange={(e) => setPat(e.currentTarget.value)}
+                  placeholder="ghp_…"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <p className="text-fg-subtle text-xs">
+                  {identityIsInherited ? (
+                    "Leave it empty to reuse the token already saved for this project."
+                  ) : mode === "join" ? (
+                    <>
+                      The board is private, so it clones with your own access to
+                      GitHub — the same token you would use to clone it by hand.
+                    </>
+                  ) : (
+                    <>
+                      GitHub → Settings → Developer settings → Personal access
+                      tokens (classic, with{" "}
+                      <code className="font-mono">repo</code> scope)
+                    </>
+                  )}
+                </p>
+              </div>
+
+              <div
+                className="gap-3"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, 1fr)",
+                }}
+              >
+                <Input
+                  label="Git user name"
+                  type="text"
+                  value={userName}
+                  onChange={(e) => setUserName(e.currentTarget.value)}
+                  placeholder="Carlos Dev"
+                  autoComplete="off"
+                />
+                <Input
+                  label="Git user email"
+                  type="email"
+                  value={userEmail}
+                  onChange={(e) => setUserEmail(e.currentTarget.value)}
+                  placeholder="carlos@example.com"
+                  autoComplete="off"
+                />
+              </div>
+
+              {identityIsInherited ? (
+                <p className="text-fg-subtle text-xs">
+                  Leave the name and email empty to reuse the ones already saved
+                  for this project.
+                </p>
+              ) : null}
+
+              {mode === "join" ? (
+                <p className="text-fg-subtle text-xs">
+                  Your access has to be granted by whoever invited you: the link
+                  is not a key, and the board is private.
+                </p>
+              ) : null}
+            </>
+          )}
 
           {error ? (
             <div
@@ -270,10 +383,20 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
             {busy ? (
               <>
                 <Loader2 size={14} className="animate-spin" />
-                {mode === "create" ? "Creating…" : "Testing & connecting…"}
+                {mode === "create"
+                  ? "Creating…"
+                  : checkingInvite
+                    ? "Checking…"
+                    : "Connecting…"}
               </>
             ) : mode === "create" ? (
               "Create board"
+            ) : mode === "join" ? (
+              checkingInvite ? (
+                "Check link"
+              ) : (
+                "Join this board"
+              )
             ) : (
               "Test & Connect"
             )}

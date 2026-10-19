@@ -39,6 +39,13 @@ export interface BoardCreateInput {
   user_email: string;
 }
 
+/** What an invitation link points to, as the backend reads it. */
+export interface InviteDetails {
+  repo_url: string;
+  board: string | null;
+  from: string | null;
+}
+
 export interface TestConnectionResult {
   ok: boolean;
   head_sha: string | null;
