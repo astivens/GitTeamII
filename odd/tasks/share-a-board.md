@@ -4,7 +4,7 @@ Objetivo: que dos o más personas compartan un board de tickets sin que nadie te
 
 Rama: `fase-6-v2-redesign` (tracker) · Runner: `cargo test` (Rust) y `npx tsc --noEmit` + `pnpm build` (frontend; no hay runner de tests JS) · Entrega: work-unit commits; el PR se decide cuando el usuario lo pida.
 
-Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`), **T3 junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`) — un link que del otro lado nadie puede canjear es una UI que miente —, **T5** (`cb16d79` + `1036d33`) y **T6** (`e38c242`, corregido en `aee846e`). T7 sigue pendiente. El diseño no cambió al implementar salvo donde el Log lo dice.
+Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`), **T3 junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`) — un link que del otro lado nadie puede canjear es una UI que miente —, **T5** (`cb16d79` + `1036d33`), **T6** (`e38c242`, corregido en `aee846e`) y **T7** (`7e8ab2e`), que verificó S6 y encontró dos agujeros reales, los dos arreglados. El diseño no cambió al implementar salvo donde el Log lo dice. La cadena publicada ya está mergeada en `main` (`57e2907`, ver L16).
 
 ## Specs
 
@@ -48,7 +48,7 @@ Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b
 | T4 | S4 | Flujo "Unirme a un board" (clonar con el PAT del que entra) | inline | **hecho** dentro de T3 (`a5c424f`); el clone real quedó sin ejercitar (sin red ni cuenta) |
 | T5 | S5 | Invitar por `@usuario` + aceptar invitaciones pendientes | inline | **hecho** `cb16d79` + `1036d33` |
 | T6 | S3 | Deep link `gitteam://` (registro del esquema) | inline | **hecho** `e38c242` + `aee846e` |
-| T7 | S6 | Verificación de que ni el link ni el repo llevan credenciales | inline | pendiente |
+| T7 | S6 | Verificación de que ni el link ni el repo llevan credenciales | inline | **hecho** `7e8ab2e` (dos agujeros reales, ver L17) |
 
 T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo deja de apuntar al repo de la app.
 
@@ -150,3 +150,23 @@ T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo
   - Evidencia final: **91 tests de unidad + 2 de integración** en verde, `npx tsc --noEmit` en 0, `pnpm build` en 0, árbol limpio.
   - No verificado y no se afirma: el click de punta a punta (sin escritorio), el runtime de la UI y el efecto real de `register_all()` sobre `~/.local/share/applications` y `~/.config/mimeapps.list` (habría que tocar la máquina del usuario; no se corrió).
   - Nota de entorno: el scratch del verificador (`/var/tmp/t6verify.gM3dn4`, 15 GB) se borró al cerrar; el recheck no creó ninguno y el workspace quedó intacto.
+- **L16 (2026-10-19)** — Pedido del usuario, verbatim: *"Pero hagamos los commist y los PRs, y seguimos con T7"*. Alcance autorizado: **publicar** los 19 commits del tracker que vivían sólo en local, **cerrar los 8 PRs abiertos** y seguir con T7.
+
+  **Los 8 PRs se mergearon en orden, con merge commits** (nunca squash), reapuntando la base de cada uno a `main` antes de mergearlo: cada rama estaba encadenada a la anterior, así que sin ese reapunte el merge habría ido a la rama previa en vez de a `main`. Los merge commits: #1 `e013bc9`, #2 `bc85ebf`, #3 `8f2a7d8`, #4 `82e4a2d`, #5 `cb51dc3`, #6 `a64aba1`, #7 `b7c08d3`, #8 `57e2907`. `main` pasó de `11c096c` a `57e2907`, los 8 PRs dieron `mergeable=clean` sin conflictos, y las ramas se dejaron intactas (no se borró ninguna). Los 19 commits del tracker se pushearon a `origin/fase-6-v2-redesign` (`6da1626..0733cc6`).
+
+  Nota para el PR del tracker, que queda pendiente de decisión del usuario: `main` ahora **tiene merge commits**, así que `origin/main` no es ancestro del tracker aunque `6da1626` sí esté adentro. Un PR de `fase-6-v2-redesign` contra `main` sería un merge normal, sin conflicto, con el diff de esos 19 commits.
+- **L17 (2026-10-19)** — **T7: la verificación de S6**, y encontró dos agujeros reales. Código en `7e8ab2e`.
+
+  **Lo auditado que no tenía agujero** (el lado que la spec nombra): el link de invitación no lleva credencial y se limpia en las dos direcciones —al construirlo y al parsear uno editado a mano—, con test propio desde T3; el remote guardado en `.git/config` queda sin userinfo, y el que ya la tenía se repara (`d9e08f1`); el PAT se guarda sólo en el keyring (`save_pat` → `keyring::Entry::set_password`, y `GitConfig` no tiene campo de token); el frontend no usa `localStorage` ni `sessionStorage` para nada de esto (el único uso es el tema); y el `assignee` del frontmatter es el `git_user_name` del clone, que no es secreto.
+
+  **Agujero 1 — el token en el mensaje de error, y era nuestro.** `run_git` arma el texto de error con `args.join(" ")`, y `run_git_with_credential` **prepend** el override `-c url.<url con token>.insteadOf=<url limpia>` a ese mismo slice: un `fetch`/`pull` fallido durante el setup —el caso real es un token vencido o mal pegado— devolvía el token adentro del error que la UI muestra. Arreglado con `redact_credentials` sobre el render de los argumentos y sobre el stderr, en el mensaje de fallo y también en el de timeout. **Reproducido por test**: `a_failed_command_does_not_report_the_credential_it_was_given` corre `run_git_with_credential` con un `rev-parse` en un directorio que no es repo —falla sin red y sin proyecto activo— y exige que el mensaje llegue sin el token y con el diagnóstico intacto.
+
+  **Agujero 2 — el token en `config.json`.** `write_git_config` escribía `repo_url` tal como llegó del formulario. Una url con token —la forma que el propio GitHub imprime para clonar con token— quedaba en texto plano en `~/.gitteam/projects/<id>/config.json` mientras el proyecto existiera, que es justo lo que S6 niega: *la credencial vive sólo en el keyring*. Arreglado en el único punto de escritura (`config_to_persist`): se guarda limpia, y el token no se pierde porque el keyring ya lo tiene.
+
+  **Un hallazgo que corrijo de mi propia auditoría.** Empecé afirmando que git imprime la url con la credencial en sus mensajes. Al medirlo —tres sondas: puerto cerrado en loopback con el token como usuario, la forma `usuario:token` de GitHub, y un host que no resuelve— git **anonimiza el userinfo** y devuelve `https://host/path` en los tres casos. O sea: el stderr de git no era un agujero reproducible. La redacción ahí quedó igual (defensa de más, barata, y cubre un git o un curl que sí la imprima), pero queda registrada como lo que es y no como el arreglo de algo reproducido; los comentarios del código dicen lo medido y no lo que yo suponía.
+
+  **Lo que queda afuera, y necesita decisión.** El override viaja en **argv**, así que el token es visible en `/proc/<pid>/cmdline` y en `ps` mientras dura cada comando de red. Cerrarlo es cambiar el mecanismo —`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_i` por entorno en vez de `-c`—, no redactar: es un cambio de mecanismo con riesgo propio y por eso se deja explícito en vez de meterlo en esta tarea de refacción.
+
+  Evidencia: **95 tests de unidad + 2 de integración** en verde (91 antes de T7), `npx tsc --noEmit` en 0, `pnpm build` en 0, árbol limpio. **Cada arreglo probado por mutación** (respaldo en scratch y restauración por caso): vaciar la redacción del redactor hace caer su tabla de casos; sacarla de `run_git` hace caer el del comando fallido; sacarla de `config_to_persist` hace caer el de `config.json`. La cuarta —sacar la redacción del formulario de conexión— **no** hace caer nada, y eso es exactamente el hallazgo de arriba.
+
+  Límite honesto: el test del formulario de conexión pasa con y sin la redacción (porque git anonimiza solo), así que fija la propiedad de punta a punta y no el arreglo; los sitios de stderr del setup y del watcher quedan cubiertos por la función y por lectura, no por un test propio. `Risk: item 1` (la url guardada se reescribe limpia en la próxima escritura, o sea toca dato ya persistido) e `item 2` (credencial).
