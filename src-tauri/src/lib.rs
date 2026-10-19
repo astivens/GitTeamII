@@ -1053,9 +1053,14 @@ fn init_data_dir() -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
-fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
+/// Every `.md` file in `dir` that the scan treats as a ticket candidate.
+///
+/// GitTeam owns top-level ticket files and nothing else — see
+/// `is_owned_ticket_path` — so a README, a note or a nested document is
+/// ordinary repository content, not a broken ticket, and produces no warning.
+fn ticket_scan_candidates(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("read_dir failed: {}", e))?;
-    let mut tickets = vec![];
+    let mut candidates = vec![];
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -1064,6 +1069,24 @@ fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // One predicate decides what GitTeam owns, for the scan as well as for
+        // staging: anything else in the repository belongs to whoever else uses
+        // it and is skipped without a word.
+        if !is_owned_ticket_path(name) {
+            continue;
+        }
+        candidates.push(path);
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
+    let mut tickets = vec![];
+    for path in ticket_scan_candidates(dir)? {
         match parse_ticket_file(&path) {
             Ok(t) => {
                 if t.id.starts_with("TKT-") {
@@ -3928,6 +3951,46 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         assert!(parsed.links.is_empty());
         assert_eq!(parsed.title, "Legacy");
         let _ = fs::remove_file(&path);
+    }
+
+    /// A tickets repository also holds notes and documentation. Those files are
+    /// not broken tickets, so the scan must neither parse them nor warn about
+    /// them.
+    #[test]
+    fn the_scan_only_looks_at_files_the_app_owns() {
+        let dir = temp_path("scan");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("notes")).unwrap();
+
+        fs::write(
+            dir.join("TKT-1000-real.md"),
+            render_frontmatter(&sample_ticket(vec![])),
+        )
+        .unwrap();
+        fs::write(dir.join("README.md"), "# Board\n\nNotes live here.\n").unwrap();
+        fs::write(dir.join("AGENTS.md"), "---\ntitle: agents\n---\n").unwrap();
+        fs::write(
+            dir.join("ticket-1001-manual.md"),
+            "---\nid: TKT-1001\ntitle: manual\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("notes").join("TKT-1002-nested.md"),
+            render_frontmatter(&ticket_with("TKT-1002", &[])),
+        )
+        .unwrap();
+
+        let names: Vec<String> = ticket_scan_candidates(&dir)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["TKT-1000-real.md".to_string()]);
+
+        let tickets = load_all_tickets(&dir).unwrap();
+        assert_eq!(tickets.len(), 1, "only the owned ticket is loaded");
+        assert_eq!(tickets[0].id, "TKT-1041");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
