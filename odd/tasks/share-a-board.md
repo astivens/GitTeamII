@@ -4,7 +4,7 @@ Objetivo: que dos o más personas compartan un board de tickets sin que nadie te
 
 Rama: `fase-6-v2-redesign` (tracker) · Runner: `cargo test` (Rust) y `npx tsc --noEmit` + `pnpm build` (frontend; no hay runner de tests JS) · Entrega: work-unit commits; el PR se decide cuando el usuario lo pida.
 
-Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`), **T3 junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`) — un link que del otro lado nadie puede canjear es una UI que miente — y **T5** (`cb16d79` + `1036d33`). T6–T7 siguen pendientes. El diseño no cambió al implementar salvo donde el Log lo dice.
+Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`), **T3 junto con la mitad de T4** (`a5c424f`, corregido en `d5805fc`) — un link que del otro lado nadie puede canjear es una UI que miente —, **T5** (`cb16d79` + `1036d33`) y **T6** (`e38c242`). T7 sigue pendiente. El diseño no cambió al implementar salvo donde el Log lo dice.
 
 ## Specs
 
@@ -47,7 +47,7 @@ Estado: el usuario aprobó las specs. **T1 (con T2) está implementado** (`3fa2b
 | T3 | S3 | Generar y parsear el link de invitación (UI de copiar/pegar) | inline | **hecho** `a5c424f` + `d5805fc` |
 | T4 | S4 | Flujo "Unirme a un board" (clonar con el PAT del que entra) | inline | **hecho** dentro de T3 (`a5c424f`); el clone real quedó sin ejercitar (sin red ni cuenta) |
 | T5 | S5 | Invitar por `@usuario` + aceptar invitaciones pendientes | inline | **hecho** `cb16d79` + `1036d33` |
-| T6 | S3 | Deep link `gitteam://` (registro del esquema) | inline | pendiente |
+| T6 | S3 | Deep link `gitteam://` (registro del esquema) | inline | **hecho** `e38c242` |
 | T7 | S6 | Verificación de que ni el link ni el repo llevan credenciales | inline | pendiente |
 
 T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo deja de apuntar al repo de la app.
@@ -120,3 +120,20 @@ T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo
   - No verificado y no se afirma: las tres llamadas HTTP de punta a punta (sin red ni cuenta) y el runtime de la UI (sin runner JS): el panel de conectar quedó verificado **por lectura**, no por un click real.
   - Nota de entorno: los scratch de los dos verificadores (`/var/tmp`, 6–7 GB cada uno) se limpiaron al cerrar; uno de ellos dejó además `/tmp/old_lib.rs`, también borrado. Se mantiene la regla: el scratch va a `/var/tmp`, nunca a `/tmp`.
 - **L12 (2026-10-18)** — RDD sobre `fc7a2e4..HEAD` después de T5: `risk: medium`, `review_due: false`, `review_due_reason: under_budget` (17 paths, ~3.1k líneas). La frontera revisada sigue en `fc7a2e4`: el review nativo no se dispara todavía. El **trigger de verificación** sí se disparó —T5 otorga acceso a un repositorio (`Risk: item 2`)—, y por eso T5 tiene verificación independiente aparte del review: son mecanismos distintos y ninguno reemplaza al otro.
+- **L13 (2026-10-19)** — OK del usuario, verbatim: *"Si"* (respuesta a "¿Sigo con T6 — registrar el esquema `gitteam://` para que el link abra la app de un click?"). Alcance autorizado: **T6** (S3).
+
+  **T6 implementado** (`e38c242`, 313 inserciones / 13 borrados en 10 archivos). La segunda vía de S3 ya existe: el sistema operativo conoce `gitteam://`, un click abre la app y esa app entra al modo unirse con el link **ya leído**, así que muestra de qué board es y de quién viene antes de pedir un token — la regla de S4 que T3 ya había fijado, ahora también por el camino del click.
+
+  **Cómo funciona, leído del código del plugin y no de memoria** (que era la duda real de T6): en Linux y Windows el sistema **no** le entrega la url a la app que ya está abierta, lanza una segunda instancia con la url como argumento. `tauri-plugin-single-instance` con su feature `deep-link` le pasa ese argumento a `tauri-plugin-deep-link`, que emite `deep-link://new-url` para la ventana que ya existe; por eso single-instance va registrado **primero**. Ese evento **no** se emite cuando el link es lo que lanzó la app (se dispara antes de que exista cualquier listener), así que el frontend además pregunta `getCurrent` al arrancar. Y el esquema tiene que estar declarado en `tauri.conf.json` (`plugins.deep-link.desktop.schemes`): sin esa entrada el plugin descarta el argumento que no reconoce y el click muere en silencio — es la pieza que ninguna doc de instalación deja obvia.
+
+  **Registro del esquema**: en un paquete lo declara el instalador; `tauri dev` no tiene instalador, así que la app lo registra al arrancar por el plugin (`register_all`). Es idempotente y corrige el `Exec` si el binario se movió, un fallo ahí no puede impedir que la app abra, y es un cambio real en la máquina del usuario: `~/.local/share/applications/gitteam-handler.desktop` más la asociación xdg-mime en `~/.config/mimeapps.list`. Es la vía documentada para registrar el esquema sin instalar nada, y por eso quedó registrado acá explícitamente.
+
+  **Decisión**: qué link es una invitación se decide en Rust, al lado del parser que ya lee una pegada a mano (`classify_received_links`), así que el formato se escribe una sola vez y la UI no lo repite — la misma razón por la que en T5 el emparejamiento invitación↔board quedó en Rust. Y un `gitteam://` que no es una invitación **lo dice en pantalla** en vez de no hacer nada: el esquema es nuestro, así que lo que llega por ahí no es automáticamente una invitación.
+
+  **Un test encontró un defecto real, y del mío**: la primera versión devolvía la invitación y la queja juntas cuando la queja aparecía antes en la lista — una invitación que gana pero que igual deja pegado el reproche de un link anterior. El test escrito junto con la función lo cazó antes de compilar nada más, y la estructura ahora hace que los dos campos **no puedan convivir** (devuelve uno u otro, nunca los dos).
+
+  **Hallazgo de dependencias, reproducible**: `tauri-plugin-deep-link` 2.6.2 construye `ini::ParseOption` campo por campo, y `rust-ini` 0.21.3 le agregó campos a esa struct **sin bump mayor**, así que el plugin no compila contra ella. La versión de abajo, 0.21.2, está yanked; el pin quedó en `rust-ini = "=0.21.1"` con el motivo en el `Cargo.toml`. La rama `v3` del plugin lo arregla con `..Default::default()`, o sea que el pin se va cuando salga una release estable de esa línea.
+
+  Evidencia: RED primero (el test del clasificador falló por el defecto real de arriba), después **87 tests de unidad + 2 de integración en verde** (83 antes de T6), `npx tsc --noEmit` en 0 y `pnpm build` en 0.
+
+  Límite honesto: **no hay escritorio donde clickear**, así que el camino de punta a punta —el sistema entrega la url, la segunda instancia se la pasa a la que corre, la ventana viene al frente, el formulario abre con el link leído— **no está verificado**; lo verificado es el mecanismo leído en el código del plugin, el clasificador por tests y el armado de la configuración y los plugins por compilación. Tampoco hay runner de tests JS, así que el ruteo en la UI está cubierto por lectura. Y el registro del esquema recién ocurre si la app **corre**: es efecto sobre la máquina del usuario, no sobre el repo. `Risk: item 5` (dos dependencias nuevas y un cambio en cómo se registra la app en la máquina) e `item 6` (nada offline puede clickear un link).
