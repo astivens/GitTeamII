@@ -35,5 +35,9 @@ src-tauri/gen/
 # OS
 Thumbs.db
 
-# Local tooling caches
+# Agent / tooling state — never part of the product
 .atl/
+.codegraph/
+.gentle-ai/
+.gentle-ai-review-index-*
+reviews/

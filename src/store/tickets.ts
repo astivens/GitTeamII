@@ -1,5 +1,11 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri";
+import {
+  applyTheme,
+  readStoredTheme,
+  storeTheme,
+  type Theme,
+} from "../lib/theme";
 import { pushToast } from "../lib/toast";
 import type { CreateTicketInput, Ticket, TicketStatus } from "../types/ticket";
 import type { Graph } from "../types/graph";
@@ -90,6 +96,10 @@ interface TicketsState {
   // Fase 6 — view mode
   viewMode: "board" | "graph";
   setViewMode: (mode: "board" | "graph") => void;
+
+  // Fase 6 — theme (local preference, mirrored to localStorage)
+  theme: Theme;
+  setTheme: (theme: Theme) => void;
 
   initialize: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -234,6 +244,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     justSetup: false,
 
     viewMode: "board",
+    theme: readStoredTheme(),
 
     initialize: async () => {
       set({ loading: true, error: null });
@@ -762,6 +773,11 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     markJustSetup: () => set({ justSetup: true }),
     clearJustSetup: () => set({ justSetup: false }),
     setViewMode: (mode) => set({ viewMode: mode }),
+    setTheme: (theme) => {
+      applyTheme(theme);
+      storeTheme(theme);
+      set({ theme });
+    },
   };
 });
 

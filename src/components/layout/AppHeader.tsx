@@ -5,20 +5,31 @@ import {
   Check,
   HelpCircle,
   LayoutGrid,
+  Moon,
   Network,
   Plug,
   Plus,
   RefreshCw,
   Search,
+  Sparkles,
+  Sun,
+  type LucideIcon,
 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { BrandLockup } from "../ui/Brand";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { useTicketsStore } from "../../store/tickets";
+import { THEMES, THEME_LABELS, type Theme } from "../../lib/theme";
 
 interface AppHeaderProps {
   onNewTicket: () => void;
 }
+
+const THEME_ICONS: Record<Theme, LucideIcon> = {
+  default: Moon,
+  light: Sun,
+  obsidian: Sparkles,
+};
 
 function formatRelativeTime(iso: string | null): string {
   if (!iso) return "";
@@ -46,6 +57,8 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
   const openHelp = useTicketsStore((s) => s.openHelp);
   const viewMode = useTicketsStore((s) => s.viewMode);
   const setViewMode = useTicketsStore((s) => s.setViewMode);
+  const theme = useTicketsStore((s) => s.theme);
+  const setTheme = useTicketsStore((s) => s.setTheme);
 
   const relativeTime = useMemo(
     () => formatRelativeTime(lastSyncedAt),
@@ -140,6 +153,24 @@ export function AppHeader({ onNewTicket }: AppHeaderProps) {
             <Network size={13} />
             Graph
           </button>
+        </div>
+        <div className="view-toggle" role="group" aria-label="Theme">
+          {THEMES.map((option) => {
+            const Icon = THEME_ICONS[option];
+            const label = `${THEME_LABELS[option]} theme`;
+            return (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={theme === option}
+                aria-label={label}
+                onClick={() => setTheme(option)}
+                title={label}
+              >
+                <Icon size={13} />
+              </button>
+            );
+          })}
         </div>
       </div>
       <div className="flex items-center gap-2">

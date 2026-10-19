@@ -39,10 +39,52 @@ Los `S#` son el contrato. Donde el texto original del pedido está disponible se
 | T9 | S8 | `GraphView` + toggle Board/Graph + editor de links en el modal | inline | hecho | `8168f16` |
 | T10 | S7 | Tests de `link_in_dir`/`unlink_in_dir` sobre archivos | inline | hecho | `fd05e12` |
 | T11 | S1–S8 | Actualizar feature doc y README | inline | hecho | `576f7a2`, `aea4e09` |
-| T12 | S1 | Toggle de tema en la UI (`data-theme`) | — | **pendiente** | — |
+| T12 | S1 | Toggle de tema en la UI (`data-theme`) | inline | hecho | `c055af4` |
 | T13 | S6 | **Fix sync destructivo**: GitTeam nunca commitea/pushea archivos que no son tickets; timeouts realistas; rechazo de checkouts incompletos | inline | hecho | (este commit) |
 
 Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (no hubo unidades paralelas independientes ni backstop de contexto), ni el de verificación independiente (no hay ítem de alto riesgo nuevo con verificación independiente pendiente; ver `Risk` abajo).
+
+## Delivery (cadena de PRs)
+
+Estrategia elegida con la decisión delegada por el usuario (`"Como gustes"`): **Stacked PRs to main**, en 8 slices. La historia es lineal y compartida, así que cada slice es un branch apuntando a su último commit y el diff de cada PR es exactamente un slice — sin rebase, sin reescritura, sin diffs contaminados. Se mergea **en orden y con merge commit** (nunca squash: el squash haría reaparecer los commits del slice anterior en el diff del siguiente).
+
+| # | Rama | Base | Commits | Líneas (+/−) | Boundary |
+|---|------|------|---------|--------------|----------|
+| 1 | `feat/01-design-system-v2` | `main` | 5 (`876d2c8`→`d9c8dc8`) | 1516+901 = 2417 | cargo test OK · tsc OK |
+| 2 | `feat/02-multi-project` | `feat/01-…` | 4 (`9178648`→`52709ca`) | 1104+104 = 1208 | cargo test OK · tsc OK |
+| 3 | `feat/03-ticket-graph` | `feat/02-…` | 6 (`31d19d1`→`58fa26d`) | 1552+149 = 1701 | cargo test OK (13) · tsc OK |
+| 4 | `feat/04-sync-ownership` | `feat/03-…` | 1 (`6baefef`) | 245+25 = **270** | cargo test OK (17) · tsc OK |
+| 5 | `feat/05-tickets-dir-seam` | `feat/04-…` | 2 (`998c011`, `06b5c04`) | 150+28 = **178** | cargo test OK (17) · tsc OK |
+| 6 | `feat/06-ticket-identity` | `feat/05-…` | 2 (`ec01beb`, `d080b63`) | 658+16 = 674 | cargo test OK (29) · tsc OK |
+| 7 | `feat/07-merge-driver` | `feat/06-…` | 4 (`dbc7e37`→`fc7a2e4`) | 1063+19 = 1082 | cargo test OK (42) · tsc OK |
+| 8 | `feat/08-theme-hygiene` | `feat/07-…` | 3 (`d366726`→`d50ad25`) + el doc del corte (`52f969b`) | 130+6 = **136** (+26 de doc = 162) | cargo test OK (42) · tsc OK |
+
+Verificación de boundaries: `cargo test` + `npx tsc --noEmit` sobre cada tip en un worktree aislado (con `main` como control) — **9/9 verdes**. Script: `/tmp/opencode/gitteam-chain-verify.sh`.
+
+Overage honesto (una sola pasada de corte, como manda el skill `chained-pr`): los slices 1, 2, 3, 6 y 7 exceden el presupuesto de 400 líneas y **no hay corte cohesivo que los baje** — el slice 1 es un port mecánico de 24 archivos que no compila a medias, el 2 y el 3 son backend + la UI que lo consume, el 6 es la feature con su test de prueba y el 7 es un solo mecanismo. Recomendación: `size:exception` para esos cinco. Los slices 4, 5 y 8 entran en presupuesto.
+
+Los bodies de los 8 PR (con el `## Chain Context` que pide el skill) están en `/tmp/opencode/gitteam-prs/`, y el script que publica todo —push de las 9 ramas + los 8 PR— en `/tmp/opencode/gitteam-prs/open-chain.sh`. **La cadena se publicó** el 2026-10-18 con autorización explícita del usuario: 8 PR abiertos en `astivens/GitTeamII` (#1 → #8), cada uno con su base en el PR anterior y el diagrama de dependencias cosido con los números reales. Mergear en orden y con merge commit.
+
+### Review nativo (RDD) — slice 7, el merge driver
+
+Candidato: `d080b63..fc7a2e4` (1082 líneas, 4 archivos). Es el **único** de los 8 slices con `review_due` (`high_risk`); con el worktree parado en el tip de cada slice, los slices 1–6 y 8 dieron `medium`/`under_budget`. Lentes: `risk`, `resilience`, `reliability` — el driver escribe el ticket mergeado, decide la degradación cuando un lado no parsea, y su política la tienen que fijar los tests.
+
+Transacción: lineage `review-e1688d3581e64df5`, target `sha256:0a602cdb…`, 3 reviewers en paralelo (los tres con admisión `completed`), presupuesto de corrección **200 líneas sin usar** y **cero correcciones** (no hubo blockers). Veredicto: **approved**; el acknowledgement exacto quemó la autoridad (`gentle-ai.review-acknowledged/v1`, `authority: burned`). El boundary revisado queda en `fc7a2e4`.
+
+Esto **no** es una aprobación de entrega: mergear y publicar siguen siendo política ordinaria del repo.
+
+Findings — todos **informational / no bloqueantes**, quedan como trabajo posterior. Ninguno autoriza scope nuevo por sí solo:
+
+| id | lente | dónde | sev | qué dice |
+|----|-------|-------|-----|----------|
+| R1-1 | risk | `lib.rs:1596-1598` | WARNING | el comando del driver se arma concatenando la ruta del ejecutable dentro de un string con comillas dobles que git después ejecuta por shell: las comillas dobles no neutralizan `$`, backticks ni `$(...)`, así que un binario instalado en una ruta con sintaxis de shell haría correr un comando sustituido con los privilegios del usuario, o rompería el driver en silencio. |
+| R1-2 | risk | `main.rs:8-9`, `lib.rs:1647` | SUGGESTION | el subcomando `merge-driver` recibe tres paths del llamador y sobrescribe el segundo con el resultado: nada verifica que el target esté adentro del repo conectado o de `tickets_dir()` (el parseo limita qué archivos son alcanzables). |
+| R4-1 | resilience | `lib.rs:1887-1893`, `1539-1541` | WARNING | el registro del driver es best-effort: los fallos van sólo a stderr y se ignoran, y en el GUI empaquetado stderr no llega a ninguna consola, así que el merge vuelve al de git sin que nadie se entere. Falta verificación post-registro de que la regla de attributes matchee algo. |
+| R4-2 | resilience | `lib.rs:1661-1676`, `1814` | WARNING | si las dos puntas cambian el mismo campo escalar (status/title/priority) gana el `last_updated` más nuevo y el otro valor se descarta **sin registro** en ningún lado; el criterio de aceptación del plan (`multi-user-foundations.md:57-58`) pide que la elección sea determinística **y registrada**. Sólo los bodies dejan rastro visible. |
+| R4-3 | resilience | `lib.rs:1795-1801` | SUGGESTION | si las dos puntas editaron el body y una edición es sólo whitespace, esa edición se pierde: la garantía de "los dos bodies sobreviven" queda acotada a líneas no vacías. |
+| R3-001 | reliability | `lib.rs:1891-1893` | WARNING | el orden que la feature documenta como load-bearing (registrar el driver antes de cada pull) no está probado: sacar `ensure_merge_driver` de `git_pull` seguiría pasando la suite. |
+| R3-002 | reliability | `lib.rs:1668-1674` | WARNING | el mismo ganador escalar silencioso de R4-2 visto desde reliability: un merge parseable pero equivocado no deja rastro para detectarlo ni revertirlo. |
+| R3-003 | reliability | `lib.rs:1589`, `merge_driver_cli.rs` | SUGGESTION | la cobertura con git real sólo ejercita un ticket en la raíz del repo — justo el acoplamiento `MERGE_DRIVER_PATTERN` ↔ `tickets_dir()` que el propio código documenta como riesgo de fallo silencioso. |
 
 ## Riesgos
 
@@ -52,7 +94,8 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
 
 ## Gaps conocidos
 
-- **Toggle de tema**: los tokens `[data-theme="default"|"light"|"obsidian"]` existen y están listos, pero **nada setea `data-theme` todavía**. El criterio "Light theme funcional" está a medias: falta la UI (issue P1-13 del audit). No se implementó acá porque no fue pedido en esta sesión.
+- **Temas autorables por el usuario**: el picker cubre los tres sets que trae el binario (`default`, `light`, `obsidian`). Cargar un set propio desde disco sigue pendiente — es parte de la visión del producto, no de T12.
+- **Preferencias de UI no persistidas**: el tema se recuerda en `localStorage` (`gitteam.theme`), pero `viewMode` sigue sin persistir (vuelve a board en cada arranque).
 - **Sync state por proyecto**: `syncStatus` sigue siendo global, no por proyecto.
 - **Cursor blink en el editor markdown**: necesita un contenteditable propio; diferido.
 - **`G L`/`G K`/`G A`**: las vistas List/Analytics no existen. Se implementó `g k` (board) y `g g` (graph) — desvío deliberado y honesto respecto del plan original.
@@ -81,12 +124,22 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
   Arreglado en T13: `git_list_local_changes` devuelve **sólo** archivos de ticket; `git_commit_ticket` rechaza cualquier path ajeno y commitea únicamente ese archivo (`git commit -- <path>`); `git_push` difea el rango exacto que publicaría (`upstream...HEAD`) y rechaza si toca algo que no es un ticket; clone 900s + limpieza del directorio si falla; presupuestos de fetch/pull/push/add/commit/status de 60-300s; y `setup_repo_inner` valida que el worktree tenga los archivos rastreados antes de aceptar el proyecto.
   Recuperación aplicada sobre el checkout real: `git reset` (reconstruye el índice desde HEAD) + `git restore --worktree` (materializa los 504 faltantes). Quedó limpio, con los 2 tickets como untracked y el remoto intacto.
 - **L9 (2026-10-17)** — Decisión abierta (requiere al usuario): un repo de aplicación no es un repo de tickets. GitTeam fue diseñado asumiendo un repo dedicado a tickets; linkear el repo real de la app hace que los commits `ticket: ...` aterricen en `main` de la aplicación. Opciones: (a) repo dedicado de tickets (recomendado), (b) tickets en un subdirectorio del repo de la app, (c) otra política. Sin respuesta todavía.
+- **L10 (2026-10-18)** — Reporte verbatim: *"Antes de eso, asegura que el gitignore esté completo, no quiero ver el rdd en el repo, por ejemplo, luego de eso puedes continuar"*.
+  Auditoría: `.atl/` ya estaba ignorado; se agregaron `.codegraph/` (el índice local de CodeGraph sí aparecía como untracked), `.gentle-ai/`, `.gentle-ai-review-index-*` y `reviews/`. Verificado con `git check-ignore -v` sobre rutas sintéticas de cada regla, y `git ls-files` no muestra nada de RDD/atl/review en `HEAD`.
+  Dato honesto: `.atl/skill-registry.md` y su cache **estuvieron** commiteados en `a3d184a` y se removieron en `d9c8dc8`; siguen existiendo en la historia. Sacarlos de ahí es reescribir historia (`filter-repo`) y no se hizo sin pedido explícito.
+  T12 implementado: la lista de temas vive en `src/lib/theme.ts` (`THEMES`, labels y persistencia) como única fuente; el store expone `theme` + `setTheme` (misma forma que `viewMode`); `setTheme` aplica `data-theme` a `<html>`, lo persiste en `localStorage` (`gitteam.theme`) y actualiza el estado; `main.tsx` aplica el tema recordado **antes** del primer render para que no haya flash. El control en el header reusa el componente `.view-toggle` (`Dark | Light | Obsidian`, iconos, `aria-pressed`, tooltips), sin CSS nuevo.
+  Decisión: la elección de tema es preferencia **local de la máquina** (localStorage), no viaja en el repo ni en el frontmatter de los tickets — así no toca ningún formato persistido. El default sigue siendo `default` (dark); no se sniffea `prefers-color-scheme` porque el criterio era que el light sea activable desde la UI.
+  Verificación: `npx tsc --noEmit` limpio; `pnpm build` OK (mismo warning de chunk >500 kB, preexistente); chequeo estructural de que cada entrada de `THEMES` tenga su bloque `[data-theme="…"]` en `index.css` (3/3). El frontend no tiene runner de tests (no hay vitest/jest en `package.json`), así que no hay RED/GREEN posible en JS: la comprobación es tsc + build + lectura, y **queda pendiente la pasada visual manual** (`pnpm tauri dev`) para los 3 temas.
+  `Risk: none` — no toca datos persistidos de tickets ni contratos de comandos; la clave nueva de `localStorage` es local y opcional.
+- **L11 (2026-10-18)** — Pregunta al usuario: preparar el corte en PRs encadenados o seguir con producto. Respuesta verbatim: *"Como gustes"* → decisión delegada. Se eligió **publicar en formato revisable en vez de seguir agregando features**: la rama acumula 28 commits y ~7700 líneas (adición + borrado) y existe **sólo en este disco**, así que el riesgo dominante no era la falta de features sino que todo el trabajo (incluido el fix del sync destructivo) no está publicado en ningún lado.
+  Corte en 8 slices con una sola pasada honesta (skill `chained-pr`): ramas `feat/01..08`, cada una apuntando al último commit de su rango contiguo, con el diff de cada PR = exactamente un slice. 9 boundaries verificados en worktree aislado (`cargo test` + `tsc`), 9/9 verdes, con `main` como control (que tiene 0 tests: la suite arranca en el slice 3).
+  Pendiente y **gated al humano**: el push de las 9 ramas y la creación de los 8 PR (`open-chain.sh`), porque push y PR siguen siendo decisiones del usuario bajo política ordinaria del repo.
 
 ## Criterios de aceptación
 
 - [x] Tailwind removido completamente
 - [x] CSS custom properties definidas y themeables vía `[data-theme]`
-- [ ] Light theme **activable** desde la UI — tokens listos, toggle pendiente (T12)
+- [x] Light theme **activable** desde la UI (T12: picker `Dark | Light | Obsidian` en el header, `data-theme` en `<html>`, elección recordada en `localStorage`)
 - [x] Brand "gitteam" + monograma visible en el header
 - [x] Copy de TKT IDs con feedback (botón Y en la tarjeta + atajo global `Y`)
 - [x] Motion signatures (sync pulse, new ticket glow)
@@ -102,4 +155,4 @@ Ruta: todas las tareas se hicieron inline. No se disparó el trigger de Writer (
 
 - Design System en OpenPencil: tab-1 page `611929921:17`
 - Memory: topic `design-system-v2` (decisiones de diseño), topic `fase-6-v2-redesign` (implementación)
-- `ui-ux-audit.md`: P0-3 (side panel), P1-9 (markdown preview), P1-13 (theme toggle — abierto)
+- `ui-ux-audit.md`: P0-3 (side panel), P1-9 (markdown preview), P1-13 (theme toggle — resuelto en T12)
