@@ -3,6 +3,7 @@ import type { CreateTicketInput, Ticket } from "../types/ticket";
 import type { Graph } from "../types/graph";
 import type {
   AddProjectInput,
+  BoardCreateInput,
   CommitResult,
   GitConfig,
   GitStatus,
@@ -27,6 +28,15 @@ export async function getActiveProject(): Promise<Project | null> {
 
 export async function addProject(input: AddProjectInput): Promise<Project> {
   return invoke<Project>("add_project", { input });
+}
+
+/**
+ * Creates a private tickets repository on GitHub and links it as the active
+ * project. A board is a repository of its own, so the application's repository
+ * is never involved.
+ */
+export async function boardCreate(input: BoardCreateInput): Promise<Project> {
+  return invoke<Project>("board_create", { input });
 }
 
 export async function removeProject(projectId: string): Promise<void> {

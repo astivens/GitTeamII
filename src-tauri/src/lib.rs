@@ -2827,6 +2827,275 @@ async fn add_project(input: AddProjectInput) -> Result<Project, String> {
     })
 }
 
+// ----- GitHub API: creating a board -----
+
+/// A failed GitHub call. Only a duplicate name is worth retrying.
+struct GithubError {
+    retryable: bool,
+    message: String,
+}
+
+/// GitHub repository names accept letters, digits, `.`, `-` and `_`. Everything
+/// else folds to `-`, runs collapse, and the ends are trimmed, so a pasted
+/// label like `Royero Labs!` becomes a usable repository name.
+fn sanitize_board_name(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '.');
+    if trimmed.is_empty() {
+        "board".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The name a board gets when the user does not pick one: the project it
+/// belongs to, so `royero-labs` yields `royero-labs-board`.
+fn default_board_name(project_name: Option<&str>) -> String {
+    match project_name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("{}-board", sanitize_board_name(name)),
+        None => "gitteam-board".to_string(),
+    }
+}
+
+/// `base`, `base-2`, `base-3`, … GitHub answers a duplicate name with 422, so
+/// the caller walks these until one is accepted. Never returns an empty list.
+fn board_name_candidates(base: &str, attempts: u32) -> Vec<String> {
+    let mut names = vec![base.to_string()];
+    for n in 2..=attempts.max(1) {
+        names.push(format!("{}-{}", base, n));
+    }
+    names
+}
+
+/// Whether a failed create means "this name is taken" — the one failure worth
+/// retrying with a different name.
+fn github_name_taken(status: u16, body: &str) -> bool {
+    status == 422 && body.contains("already exists")
+}
+
+/// The `message` of a GitHub error body, which reads better than the raw JSON,
+/// or `None` when the body is not JSON or carries no message.
+fn first_json_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .and_then(|e| e.first())
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .or_else(|| value.get("message").and_then(|m| m.as_str()))
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+}
+
+/// A short single-line form of an unexpected body, for an error message.
+fn snippet(body: &str) -> String {
+    let one_line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return "no response body".to_string();
+    }
+    let cut: String = one_line.chars().take(200).collect();
+    if one_line.chars().count() > 200 {
+        format!("{}…", cut)
+    } else {
+        cut
+    }
+}
+
+/// Turns a failed GitHub response into something the user can act on. The case
+/// worth the care is a token without the `repo` scope: GitHub answers 403, or a
+/// deliberately vague 404, and never says which scope is missing — the scopes
+/// header is the only honest source.
+fn github_api_error(status: u16, oauth_scopes: Option<&str>, body: &str) -> String {
+    let scopes = oauth_scopes.unwrap_or("").trim();
+    let has_repo_scope = scopes.split(',').any(|s| s.trim() == "repo");
+    match status {
+        401 => "GitHub rejected the token. It may be expired or revoked: create a new one and try again.".to_string(),
+        403 | 404 if !has_repo_scope => format!(
+            "Your GitHub token is missing the `repo` scope, which is required to create a repository. Scopes it has: {}.",
+            if scopes.is_empty() { "none" } else { scopes }
+        ),
+        403 => "GitHub refused the request: this token's permissions do not allow creating a repository.".to_string(),
+        422 => format!(
+            "GitHub rejected the repository: {}.",
+            first_json_message(body).unwrap_or_else(|| "the request was rejected".to_string())
+        ),
+        other => format!("GitHub returned {}: {}", other, snippet(body)),
+    }
+}
+
+/// The token to create the board with: what the user just typed wins, otherwise
+/// the active project's saved one.
+fn choose_board_pat(input: Option<String>, stored: Option<String>) -> Result<String, String> {
+    input
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .or_else(|| {
+            stored
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+        })
+        .ok_or_else(|| "Enter your GitHub token to create the board.".to_string())
+}
+
+/// The git identity for the new board's commits: the form wins, otherwise the
+/// active project's, otherwise the user has to fill it in.
+fn choose_git_identity(
+    input_name: Option<String>,
+    input_email: Option<String>,
+    config: Option<&GitConfig>,
+) -> Result<(String, String), String> {
+    let pick = |input: Option<String>, saved: Option<&str>| {
+        input
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                saved
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
+    };
+    let name = pick(input_name, config.map(|c| c.git_user_name.as_str()))
+        .ok_or_else(|| "Enter the git user name for this board.".to_string())?;
+    let email = pick(input_email, config.map(|c| c.git_user_email.as_str()))
+        .ok_or_else(|| "Enter the git user email for this board.".to_string())?;
+    Ok((name, email))
+}
+
+/// Creates a private repository on GitHub and returns its clone url.
+///
+/// `auto_init` matters: an empty repository has no default branch, and the
+/// clone that follows could not check anything out of it.
+async fn github_create_repo(pat: &str, name: &str) -> Result<String, GithubError> {
+    let fatal = |message: String| GithubError {
+        retryable: false,
+        message,
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| fatal(format!("could not start the HTTP client: {}", e)))?;
+
+    let body = serde_json::json!({
+        "name": name,
+        "private": true,
+        "auto_init": true,
+    })
+    .to_string();
+
+    let response = client
+        .post("https://api.github.com/user/repos")
+        .header("Authorization", format!("Bearer {}", pat))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "gitteam")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| fatal(format!("could not reach GitHub: {}", e)))?;
+
+    let status = response.status().as_u16();
+    let scopes = response
+        .headers()
+        .get("x-oauth-scopes")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+    let text = response.text().await.unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            fatal(format!(
+                "GitHub created the repository but answered with something unreadable: {}",
+                e
+            ))
+        })?;
+        let clone_url = value
+            .get("clone_url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                fatal("GitHub created the repository but did not return a clone url.".to_string())
+            })?;
+        return Ok(clone_url.to_string());
+    }
+
+    Err(GithubError {
+        retryable: github_name_taken(status, &text),
+        message: github_api_error(status, scopes.as_deref(), &text),
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct BoardCreateInput {
+    /// Empty or absent falls back to `<project>-board`.
+    pub name: Option<String>,
+    /// Empty or absent falls back to the active project's saved token.
+    pub pat: Option<String>,
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+}
+
+/// Creates a board: a private repository on GitHub that holds only tickets, and
+/// links it as a project through the same path as any other repository.
+///
+/// Sharing a board is sharing that repository, which is why the application's
+/// own repository never participates: it stays a place for code.
+#[tauri::command]
+async fn board_create(input: BoardCreateInput) -> Result<Project, String> {
+    let config = read_git_config()?;
+    let pat = choose_board_pat(input.pat, load_pat().ok())?;
+    let (user_name, user_email) =
+        choose_git_identity(input.user_name, input.user_email, config.as_ref())?;
+
+    let base = match input.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(raw) => sanitize_board_name(raw),
+        None => default_board_name(
+            config
+                .as_ref()
+                .map(|c| extract_repo_name(&c.repo_url))
+                .as_deref(),
+        ),
+    };
+
+    let mut last_error = None;
+    let mut created_url = None;
+    for candidate in board_name_candidates(&base, 4) {
+        match github_create_repo(&pat, &candidate).await {
+            Ok(url) => {
+                created_url = Some(url);
+                break;
+            }
+            Err(e) if e.retryable => last_error = Some(e.message),
+            Err(e) => return Err(e.message),
+        }
+    }
+    let url = created_url.ok_or_else(|| {
+        last_error.unwrap_or_else(|| "could not create the board repository".to_string())
+    })?;
+
+    // The repository exists on GitHub from here on, so any later failure has to
+    // say so: otherwise the user is left with a repository nobody can find.
+    add_project(AddProjectInput {
+        url: url.clone(),
+        pat,
+        user_name,
+        user_email,
+    })
+    .await
+    .map_err(|e| {
+        format!(
+            "The board repository was created at {} but linking it failed: {}",
+            url, e
+        )
+    })
+}
+
 #[tauri::command]
 fn remove_project(project_id: String) -> Result<(), String> {
     let was_active = read_active_id()?.as_deref() == Some(project_id.as_str());
@@ -2894,6 +3163,7 @@ pub fn run() {
             list_projects,
             get_active_project,
             add_project,
+            board_create,
             remove_project,
             switch_project,
             // Graph (Fase 6F)
@@ -4263,5 +4533,129 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sanitize_board_name_folds_what_a_repository_name_cannot_hold() {
+        assert_eq!(sanitize_board_name("Royero Labs"), "royero-labs");
+        assert_eq!(sanitize_board_name("  board!!  "), "board");
+        assert_eq!(sanitize_board_name("a/b"), "a-b");
+        assert_eq!(sanitize_board_name("keep_this.one"), "keep_this.one");
+        assert_eq!(sanitize_board_name("-already-"), "already");
+        assert_eq!(sanitize_board_name("a   b"), "a-b");
+        assert_eq!(sanitize_board_name("!!!"), "board");
+        assert_eq!(sanitize_board_name(""), "board");
+    }
+
+    #[test]
+    fn default_board_name_prefers_the_project_it_belongs_to() {
+        assert_eq!(default_board_name(Some("royero-labs")), "royero-labs-board");
+        assert_eq!(default_board_name(Some("Royero Labs")), "royero-labs-board");
+        assert_eq!(default_board_name(Some("   ")), "gitteam-board");
+        assert_eq!(default_board_name(None), "gitteam-board");
+    }
+
+    #[test]
+    fn board_name_candidates_offer_numbered_fallbacks() {
+        assert_eq!(
+            board_name_candidates("royero-board", 3),
+            vec!["royero-board", "royero-board-2", "royero-board-3"]
+        );
+        assert_eq!(board_name_candidates("b", 1), vec!["b"]);
+    }
+
+    #[test]
+    fn a_taken_name_is_the_only_retryable_create_failure() {
+        assert!(github_name_taken(
+            422,
+            r#"{"message":"Repository creation failed.","errors":[{"message":"name already exists on this account"}]}"#
+        ));
+        assert!(!github_name_taken(422, r#"{"message":"Validation Failed"}"#));
+        assert!(!github_name_taken(
+            403,
+            r#"{"message":"name already exists on this account"}"#
+        ));
+    }
+
+    #[test]
+    fn a_token_without_the_repo_scope_says_so_instead_of_a_bare_403() {
+        // GitHub answers 403 (or a deliberately vague 404) when the scope is
+        // missing, and never says which scope: the header is the only source.
+        let missing = github_api_error(403, Some("public_repo, workflow"), "{}");
+        assert!(missing.contains("`repo`"), "{}", missing);
+        assert!(missing.contains("public_repo, workflow"), "{}", missing);
+
+        let hidden = github_api_error(404, Some(""), "{}");
+        assert!(hidden.contains("`repo`"), "{}", hidden);
+        assert!(hidden.contains("none"), "{}", hidden);
+
+        // A 401 is about the token itself, not about a scope.
+        let invalid = github_api_error(401, None, "{}");
+        assert!(invalid.contains("expired"), "{}", invalid);
+
+        // Scope present: the 403 is a plain permission problem.
+        let refused = github_api_error(403, Some("repo, workflow"), "{}");
+        assert!(!refused.contains("missing"), "{}", refused);
+        assert!(refused.contains("permissions"), "{}", refused);
+    }
+
+    #[test]
+    fn a_github_error_prefers_the_specific_message() {
+        let body = r#"{"message":"Validation Failed","errors":[{"message":"name already exists on this account"}]}"#;
+        let message = github_api_error(422, Some("repo"), body);
+        assert!(
+            message.contains("name already exists on this account"),
+            "{}",
+            message
+        );
+
+        // A body that is not JSON must not derail the message.
+        let raw = github_api_error(500, None, "  boom\n\n");
+        assert!(raw.contains("500") && raw.contains("boom"), "{}", raw);
+
+        // Nor one that is empty.
+        let empty = github_api_error(500, None, "");
+        assert!(empty.contains("500"), "{}", empty);
+    }
+
+    #[test]
+    fn the_board_credential_comes_from_the_form_or_the_saved_project() {
+        assert_eq!(
+            choose_board_pat(Some("  typed  ".to_string()), Some("saved".to_string())).unwrap(),
+            "typed"
+        );
+        assert_eq!(
+            choose_board_pat(None, Some("saved".to_string())).unwrap(),
+            "saved"
+        );
+        assert_eq!(
+            choose_board_pat(Some("   ".to_string()), Some("saved".to_string())).unwrap(),
+            "saved"
+        );
+        assert!(choose_board_pat(None, None).is_err());
+    }
+
+    #[test]
+    fn the_board_git_identity_comes_from_the_form_or_the_saved_project() {
+        let config = GitConfig {
+            repo_url: "https://github.com/a/b.git".to_string(),
+            git_user_name: "Saved Name".to_string(),
+            git_user_email: "saved@example.com".to_string(),
+            last_sync_at: None,
+        };
+        assert_eq!(
+            choose_git_identity(None, None, Some(&config)).unwrap(),
+            ("Saved Name".to_string(), "saved@example.com".to_string())
+        );
+        assert_eq!(
+            choose_git_identity(
+                Some("Typed".to_string()),
+                Some("typed@example.com".to_string()),
+                Some(&config)
+            )
+            .unwrap(),
+            ("Typed".to_string(), "typed@example.com".to_string())
+        );
+        assert!(choose_git_identity(None, None, None).is_err());
     }
 }

@@ -34,6 +34,13 @@ dirs = "5"
 getrandom = "0.3"
 keyring = { version = "3", features = ["linux-native", "apple-native", "windows-native"] }
 tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-thread", "time"] }
+# Already in the dependency graph via tauri, but with no TLS backend: the app
+# itself never spoke HTTPS, git does that. Creating a board has to call the
+# GitHub API, so this promotes the crate and adds rustls as the only new
+# crates. rustls uses the aws-lc-rs provider, which compiles a C library and
+# therefore needs cmake and a C toolchain to build (Linux already needs both for
+# tauri). Unlike native-tls, it does not want the system OpenSSL headers.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
