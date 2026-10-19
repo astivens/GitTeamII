@@ -387,7 +387,7 @@ export function SetupScreen({ onCancel }: SetupScreenProps) {
                   ? "Creating…"
                   : checkingInvite
                     ? "Checking…"
-                    : "Connecting…"}
+                    : "Testing & connecting…"}
               </>
             ) : mode === "create" ? (
               "Create board"
