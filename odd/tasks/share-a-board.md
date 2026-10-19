@@ -187,3 +187,19 @@ T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo
   Recomendación abierta, no aplicada: el token sigue viajando en **argv** (confirmado en `/proc/<pid>/cmdline` y en `ps`), y cerrarlo es cambiar `-c` por `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_i` por entorno — decisión del usuario, no de esta tarea. Advisories que no se tocaron: una url con `@` en el path se corrompe al escribirla (`strip_userinfo`/`invite_repo_url`, fuera de dominio para GitHub y anterior a T7), y `strip_stored_userinfo` sigue siendo sensible al caso para un remote guardado a mano en mayúsculas (el remote que escribe la app queda limpio igual, porque `strip_userinfo` no lo es).
 
   RDD sobre `fc7a2e4..HEAD` después de la corrección: `risk: medium`, `review_due: false`, `review_due_reason: under_budget` (21 paths, 3837 líneas). La frontera revisada sigue en `fc7a2e4`.
+
+- **L19 (2026-10-19)** — **Entrega del tracker: cinco PRs encadenados.** El usuario eligió rebanar por tarea en vez de un PR único a `main`.
+
+  Los cortes son los naturales del log, con la base de cada PR en la rama anterior y merge en orden con merge commits (nunca squash):
+
+  | PR | Rama | Base | Commits | Líneas cambiadas | /400 |
+  |----|------|------|---------|------------------|------|
+  | #9 | `feat/09-board-creation` | `main` | `3fa2b1e`, `a7b8cc8`, `18c6581` — T1–T2 | 1442 | excede; el PR #1 de la cadena anterior traía 2417 |
+  | #10 | `feat/10-invite-and-join` | `feat/09-board-creation` | `a5c424f`, `d5805fc`, `424930c` — T3–T4 | 784 | excede |
+  | #11 | `feat/11-collaborators` | `feat/10-invite-and-join` | `cb16d79`, `1036d33`, `6ec646a`, `7389a35`, `08adddc`, `725fd30` — T5 | 968 | excede |
+  | #12 | `feat/12-deep-link` | `feat/11-collaborators` | `e38c242`, `51accd5`, `aee846e`, `0733cc6` — T6 | 413 | 13 de más |
+  | #13 | `feat/13-credential-verification` | `feat/12-deep-link` | `7e8ab2e`, `4e89cb7`, `2fdb83b`, `bbb0e1a` — T7 | 336 | dentro |
+
+  Los cinco dieron `MERGEABLE` al crearse y **cada uno muestra sólo su rebanada** en el diff. El presupuesto de ~400 líneas se excede en cuatro de cinco: no hay un corte honesto que los baje sin separar los tests y los docs de la unidad que verifican, que es justo lo que el corte por rebanada prohíbe, así que el corte se queda en la tarea y la excepción se declara acá y en cada PR. Los cuerpos llevan el `## Chain Context` —base, dependencia, follow-up, presupuesto, diagrama con 📍— siguiendo la convención **medida** de este repo y no la del repo de Gentle AI: GitTeam no tiene `.github`, ni CI, ni issues, y el PR #1 de la cadena anterior no llevaba labels.
+
+  El push de las ramas y la creación de los PRs los autorizó el usuario; **el merge de los cinco sigue siendo su decisión**. Este commit es sólo anotación de entrega: vive en la rama tracker y no entra en ninguna de las cinco rebanadas.
