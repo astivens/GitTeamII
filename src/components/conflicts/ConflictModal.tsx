@@ -6,6 +6,7 @@ import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useTicketsStore } from "../../store/tickets";
 import { pushToast } from "../../lib/toast";
+import { useI18n } from "../../lib/i18n";
 import {
   gitReadConflictVersion,
 } from "../../lib/tauri";
@@ -20,6 +21,7 @@ type View =
   | { kind: "resolve"; filename: string };
 
 export function ConflictModal({ open, onClose }: ConflictModalProps) {
+  const { t } = useI18n();
   const conflicts = useTicketsStore((s) => s.conflicts);
   const resolveConflict = useTicketsStore((s) => s.resolveConflict);
   const abortResolution = useTicketsStore((s) => s.abortResolution);
@@ -85,7 +87,9 @@ export function ConflictModal({ open, onClose }: ConflictModalProps) {
       setView({ kind: "list" });
     } catch (e) {
       pushToast(
-        `Could not resolve: ${e instanceof Error ? e.message : String(e)}`,
+        t.misc.conflicts.couldNotResolve(
+          e instanceof Error ? e.message : String(e),
+        ),
         "error",
       );
     } finally {
@@ -117,8 +121,8 @@ export function ConflictModal({ open, onClose }: ConflictModalProps) {
 
   const title =
     view.kind === "list"
-      ? `Resolve conflicts (${conflicts.length})`
-      : `Resolve ${view.filename}`;
+      ? t.misc.conflicts.title(conflicts.length)
+      : t.misc.conflicts.resolveTitle(view.filename);
 
   const footer =
     view.kind === "list" ? (
@@ -130,7 +134,7 @@ export function ConflictModal({ open, onClose }: ConflictModalProps) {
             disabled={busy}
           >
             <XCircle size={14} />
-            Abort rebase
+            {t.misc.conflicts.abortRebase}
           </Button>
         </div>
         <Button
@@ -139,11 +143,11 @@ export function ConflictModal({ open, onClose }: ConflictModalProps) {
           disabled={busy || conflicts.length > 0}
           title={
             conflicts.length > 0
-              ? "Resolve every file before finishing"
-              : "Finish the rebase"
+              ? t.misc.conflicts.finishBlocked
+              : t.misc.conflicts.finishRebase
           }
         >
-          Done — finish resolution
+          {t.misc.conflicts.done} — {t.misc.conflicts.finishResolution}
         </Button>
       </>
     ) : null;
@@ -187,13 +191,15 @@ interface ConflictListProps {
 }
 
 function ConflictList({ conflicts, onOpen, busy }: ConflictListProps) {
+  const { t } = useI18n();
   if (conflicts.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
         <FileWarning size={32} style={{ color: "var(--status-done)" }} />
         <p className="text-sm text-fg-muted">
-          All conflicts resolved. Click <strong>Done</strong> below to finish
-          the rebase.
+          {t.misc.conflicts.allResolvedPrefix}
+          <strong>{t.misc.conflicts.done}</strong>
+          {t.misc.conflicts.allResolvedSuffix}
         </p>
       </div>
     );
@@ -213,7 +219,7 @@ function ConflictList({ conflicts, onOpen, busy }: ConflictListProps) {
             onClick={() => onOpen(filename)}
             disabled={busy}
           >
-            Open
+            {t.misc.conflicts.open}
           </Button>
         </li>
       ))}
@@ -242,21 +248,22 @@ function ConflictResolveView({
   onAbort,
   onResolve,
 }: ConflictResolveViewProps) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
         <Button variant="ghost" onClick={onBack} disabled={busy}>
           <ArrowLeft size={14} />
-          Back to list
+          {t.misc.conflicts.backToList}
         </Button>
         <Button
           variant="ghost"
           onClick={onAbort}
           disabled={busy}
-          aria-label="Abort rebase"
+          aria-label={t.misc.conflicts.abortRebase}
         >
           <XCircle size={14} />
-          Abort rebase
+          {t.misc.conflicts.abortRebase}
         </Button>
       </div>
 
@@ -267,7 +274,7 @@ function ConflictResolveView({
           className="text-xs font-mono whitespace-pre-wrap"
           style={{ color: "var(--priority-urgent)" }}
         >
-          Could not load preview: {previewError}
+          {t.misc.conflicts.previewLoadError(previewError)}
         </p>
       ) : null}
 
@@ -281,11 +288,11 @@ function ConflictResolveView({
         }}
       >
         <PreviewPanel
-          title="Local (your changes)"
+          title={t.misc.conflicts.local}
           content={localContent}
         />
         <PreviewPanel
-          title="Remote (their changes)"
+          title={t.misc.conflicts.remote}
           content={remoteContent}
         />
       </div>
@@ -296,22 +303,22 @@ function ConflictResolveView({
           onClick={() => onResolve("local")}
           disabled={busy}
         >
-          Keep local
+          {t.misc.conflicts.keepLocal}
         </Button>
         <Button
           variant="outline"
           onClick={() => onResolve("remote")}
           disabled={busy}
         >
-          Keep remote
+          {t.misc.conflicts.keepRemote}
         </Button>
         <Button
           variant="primary"
           onClick={() => onResolve("both")}
           disabled={busy}
-          title="Keep both — saves the remote version as <filename>.remote.md"
+          title={t.misc.conflicts.keepBothHint}
         >
-          Keep both
+          {t.misc.conflicts.keepBoth}
         </Button>
       </div>
     </div>
@@ -324,6 +331,7 @@ interface PreviewPanelProps {
 }
 
 function PreviewPanel({ title, content }: PreviewPanelProps) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-col rounded-md border bg-bg-subtle overflow-hidden">
       <div className="px-3 py-1.5 border-b text-xs font-medium text-fg-muted bg-bg-elevated">
@@ -332,7 +340,7 @@ function PreviewPanel({ title, content }: PreviewPanelProps) {
       <div className="flex-1 overflow-auto p-3 text-sm">
         {content.length === 0 ? (
           <p className="text-fg-subtle" style={{ fontStyle: "italic" }}>
-            Empty
+            {t.misc.conflicts.emptyPreview}
           </p>
         ) : (
           <div className="markdown-body">

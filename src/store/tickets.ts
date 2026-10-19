@@ -7,6 +7,7 @@ import {
   type Theme,
 } from "../lib/theme";
 import { pushToast } from "../lib/toast";
+import { msg } from "../lib/i18n";
 import type { CreateTicketInput, Ticket, TicketStatus } from "../types/ticket";
 import type { Graph } from "../types/graph";
 import type {
@@ -180,12 +181,11 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
     }
     if (lastError) {
       set({ syncStatus: "error", syncError: lastError });
-      pushToast(`Sync error: ${lastError}`, "error");
+      pushToast(msg().misc.store.syncError(lastError), "error");
     } else {
       set({ syncStatus: "synced", syncError: null });
       if (successCount > 0) {
-        const label =
-          successCount === 1 ? "Synced 1 ticket" : `Synced ${successCount} tickets`;
+        const label = msg().misc.store.syncedTickets(successCount);
         pushToast(label, "success");
       }
     }
@@ -391,8 +391,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           if (!pat) {
             set({
               syncStatus: "error",
-              syncError:
-                "Data directory is not initialized and no PAT is saved. Please reconnect.",
+              syncError: msg().misc.store.dataDirUninitialized,
             });
             return;
           }
@@ -531,7 +530,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         await api.removeProject(id);
       } catch (e) {
         pushToast(
-          `Could not remove project: ${e instanceof Error ? e.message : String(e)}`,
+          msg().misc.store.removeProjectError(
+            e instanceof Error ? e.message : String(e),
+          ),
           "error",
         );
         throw e;
@@ -607,7 +608,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         set({ graph });
       } catch (e) {
         pushToast(
-          `Could not build graph: ${e instanceof Error ? e.message : String(e)}`,
+          msg().misc.store.graphError(
+            e instanceof Error ? e.message : String(e),
+          ),
           "error",
         );
       }
@@ -652,10 +655,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           conflicts: [],
         });
         if (pullResult.commits_pulled > 0) {
-          const label =
-            pullResult.commits_pulled === 1
-              ? "Pulled 1 commit"
-              : `Pulled ${pullResult.commits_pulled} commits`;
+          const label = msg().misc.store.pulledCommits(pullResult.commits_pulled);
           pushToast(label, "success");
         }
         if (pullResult.renamed_ids.length > 0) {
@@ -664,7 +664,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           const pairs = pullResult.renamed_ids
             .map((r) => `${r.from} → ${r.to}`)
             .join(", ");
-          pushToast(`Renumbered duplicate ticket ids: ${pairs}`, "success");
+          pushToast(msg().misc.store.renumberedIds(pairs), "success");
           // The graph is keyed by display id, so it moved with them.
           await get().loadGraph();
         }
@@ -716,7 +716,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       } catch (e) {
         // Non-fatal — keep the previous list and surface via toast
         pushToast(
-          `Could not load conflicts: ${e instanceof Error ? e.message : String(e)}`,
+          msg().misc.store.conflictsError(
+            e instanceof Error ? e.message : String(e),
+          ),
           "error",
         );
       }
@@ -726,7 +728,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
       try {
         const newFile = await api.gitResolveConflict(filename, resolution);
         if (newFile) {
-          pushToast(`Remote version saved as ${newFile}`, "success");
+          pushToast(msg().misc.store.remoteSaved(newFile), "success");
         }
         // Refresh tickets so the new file (if any) shows up, then reload the
         // conflicts list to see what's still unresolved.
@@ -739,7 +741,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         }
       } catch (e) {
         pushToast(
-          `Could not resolve conflict: ${e instanceof Error ? e.message : String(e)}`,
+          msg().misc.store.resolveError(
+            e instanceof Error ? e.message : String(e),
+          ),
           "error",
         );
         throw e;
@@ -756,11 +760,13 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
           conflicts: [],
           lastSyncedAt: new Date().toISOString(),
         });
-        pushToast("Conflicts resolved", "success");
+        pushToast(msg().misc.store.conflictsResolved, "success");
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        set({ syncStatus: "error", syncError: msg });
-        pushToast(`Could not finish resolution: ${msg}`, "error");
+        // `msg` is the dictionary helper in this module, so the backend detail
+        // needs a name of its own.
+        const detail = e instanceof Error ? e.message : String(e);
+        set({ syncStatus: "error", syncError: detail });
+        pushToast(msg().misc.store.finishError(detail), "error");
         throw e;
       }
     },
@@ -770,7 +776,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         await api.gitAbortResolution();
       } catch (e) {
         pushToast(
-          `Could not abort: ${e instanceof Error ? e.message : String(e)}`,
+          msg().misc.store.abortError(
+            e instanceof Error ? e.message : String(e),
+          ),
           "error",
         );
         return;
@@ -781,7 +789,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         syncError: null,
         conflicts: [],
       });
-      pushToast("Resolution aborted", "default");
+      pushToast(msg().misc.store.resolutionAborted, "default");
     },
 
     // ----- Fase 5 UI actions -----

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff, Search, Shuffle } from "lucide-react";
 import { useTicketsStore } from "../../store/tickets";
+import { useI18n } from "../../lib/i18n";
 import type { GraphEdge, GraphNode } from "../../types/graph";
 import type { TicketStatus } from "../../types/ticket";
 
@@ -159,6 +160,7 @@ interface GraphViewProps {
 }
 
 export function GraphView({ onOpenTicket }: GraphViewProps) {
+  const { t } = useI18n();
   const graph = useTicketsStore((s) => s.graph);
   const loadGraph = useTicketsStore((s) => s.loadGraph);
 
@@ -417,7 +419,7 @@ export function GraphView({ onOpenTicket }: GraphViewProps) {
           <input
             value={query}
             onChange={(e) => setQuery(e.currentTarget.value)}
-            placeholder="Filter by id, title or tag…"
+            placeholder={t.misc.graph.filterPlaceholder}
             spellCheck={false}
           />
         </label>
@@ -425,36 +427,39 @@ export function GraphView({ onOpenTicket }: GraphViewProps) {
           type="button"
           className="btn-ghost"
           onClick={() => setShowOrphans((v) => !v)}
-          title={showOrphans ? "Hide unlinked tickets" : "Show unlinked tickets"}
+          title={
+            showOrphans ? t.misc.graph.hideUnlinked : t.misc.graph.showUnlinked
+          }
           aria-pressed={!showOrphans}
         >
           {showOrphans ? <Eye size={14} /> : <EyeOff size={14} />}
-          Unlinked
+          {t.misc.graph.unlinked}
         </button>
         <button
           type="button"
           className="btn-ghost"
           onClick={relayout}
-          title="Re-run the layout"
+          title={t.misc.graph.relayoutHint}
         >
           <Shuffle size={14} />
-          Re-layout
+          {t.misc.graph.relayout}
         </button>
         <span className="graph-count">
-          {visible.length} {visible.length === 1 ? "ticket" : "tickets"} ·{" "}
-          {edges.length} {edges.length === 1 ? "link" : "links"}
+          {t.misc.graph.counts(visible.length, edges.length)}
         </span>
       </div>
 
       {isEmpty ? (
         <div className="graph-empty">
-          <p className="font-mono text-lg font-bold text-fg">Nothing to map yet.</p>
+          <p className="font-mono text-lg font-bold text-fg">
+            {t.misc.graph.emptyTitle}
+          </p>
           <p className="text-fg-muted text-sm">
-            Link tickets with{" "}
+            {t.misc.graph.emptyHintPrefix}{" "}
             <span className="font-mono text-fg">
               links: [TKT-1041]
             </span>{" "}
-            and they show up here as an edge.
+            {t.misc.graph.emptyHintSuffix}
           </p>
         </div>
       ) : (
@@ -466,7 +471,7 @@ export function GraphView({ onOpenTicket }: GraphViewProps) {
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
           role="application"
-          aria-label="Ticket graph"
+          aria-label={t.misc.graph.canvasAria}
         >
           <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
             {edges.map((e) => {

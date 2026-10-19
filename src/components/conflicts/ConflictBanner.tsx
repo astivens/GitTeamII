@@ -1,22 +1,19 @@
 import { AlertTriangle, Wrench, XCircle } from "lucide-react";
 import { Button } from "../ui/Button";
 import { useTicketsStore } from "../../store/tickets";
+import { useI18n } from "../../lib/i18n";
 
 interface ConflictBannerProps {
   onResolve: () => void;
 }
 
 export function ConflictBanner({ onResolve }: ConflictBannerProps) {
+  const { t } = useI18n();
   const conflicts = useTicketsStore((s) => s.conflicts);
   const abortResolution = useTicketsStore((s) => s.abortResolution);
 
   const count = conflicts.length;
-  const label =
-    count === 0
-      ? "All conflicts resolved — finish the rebase"
-      : count === 1
-        ? "1 file in conflict"
-        : `${count} files in conflict`;
+  const label = t.misc.conflicts.bannerLabel(count);
 
   return (
     <div
@@ -36,19 +33,19 @@ export function ConflictBanner({ onResolve }: ConflictBannerProps) {
         <Button
           variant="outline"
           onClick={onResolve}
-          aria-label="Open conflict resolution"
+          aria-label={t.misc.conflicts.bannerResolveAria}
         >
           <Wrench size={14} />
-          Resolve
+          {t.misc.conflicts.bannerResolve}
         </Button>
         <Button
           variant="ghost"
           onClick={() => void abortResolution()}
-          aria-label="Abort rebase"
+          aria-label={t.misc.conflicts.abortRebase}
           title="git rebase --abort"
         >
           <XCircle size={14} />
-          Abort
+          {t.misc.conflicts.abort}
         </Button>
       </div>
     </div>
