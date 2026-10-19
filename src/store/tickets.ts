@@ -626,6 +626,16 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
               : `Pulled ${pullResult.commits_pulled} commits`;
           pushToast(label, "success");
         }
+        if (pullResult.renamed_ids.length > 0) {
+          // Two people created the same display id offline: the older ticket
+          // kept it, the other one was renumbered and its links rewritten.
+          const pairs = pullResult.renamed_ids
+            .map((r) => `${r.from} → ${r.to}`)
+            .join(", ");
+          pushToast(`Renumbered duplicate ticket ids: ${pairs}`, "success");
+          // The graph is keyed by display id, so it moved with them.
+          await get().loadGraph();
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.startsWith("CONFLICT:") || msg.startsWith("REJECTED:")) {

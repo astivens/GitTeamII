@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use gray_matter::engine::YAML;
@@ -12,9 +13,19 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Ticket {
     pub id: String,
+    /// Stable identity, assigned when the ticket is created and never changed
+    /// afterwards.
+    ///
+    /// The display id is what a person copies around, and it has to stay short.
+    /// Two people working offline can still land on the same one, so this is
+    /// what decides who keeps it and what makes that decision reproducible in
+    /// every clone. It is optional and only emitted when present: tickets
+    /// written before this scheme existed must keep parsing untouched.
+    #[serde(default)]
+    pub uid: Option<String>,
     pub title: String,
     pub status: String,
     pub assignee: Option<String>,
@@ -97,6 +108,9 @@ pub struct PullResult {
     pub head_sha: String,
     pub files_changed: Vec<String>,
     pub commits_pulled: u32,
+    /// Display ids the pull had to renumber, for the app to report.
+    #[serde(default)]
+    pub renamed_ids: Vec<IdRename>,
 }
 
 #[derive(Serialize, Debug)]
@@ -645,9 +659,16 @@ fn render_frontmatter(t: &Ticket) -> String {
     } else {
         format!("links: {}\n", yaml_flow_seq(&t.links))
     };
+    // Same criterion as `links`: a ticket with no identity is not rewritten
+    // just to carry an empty field.
+    let uid_line = match &t.uid {
+        Some(uid) => format!("uid: {}\n", yaml_quote(uid)),
+        None => String::new(),
+    };
     format!(
-        "---\nid: {id}\ntitle: {title}\nstatus: {status}\n{assignee}priority: {priority}\n{tags}{links}last_updated: {last_updated}\n---\n\n{body}",
+        "---\nid: {id}\n{uid}title: {title}\nstatus: {status}\n{assignee}priority: {priority}\n{tags}{links}last_updated: {last_updated}\n---\n\n{body}",
         id = yaml_quote(&t.id),
+        uid = uid_line,
         title = yaml_quote(&t.title),
         status = yaml_quote(&t.status),
         assignee = assignee_line,
@@ -728,6 +749,7 @@ fn parse_ticket_file(path: &Path) -> Result<Ticket, String> {
     let priority = get_str("priority")?;
     let last_updated = get_str("last_updated")?;
     let assignee = get_opt_str("assignee")?;
+    let uid = get_opt_str("uid")?;
     let tags = get_tags()?;
     let links = get_links()?;
 
@@ -740,6 +762,7 @@ fn parse_ticket_file(path: &Path) -> Result<Ticket, String> {
 
     Ok(Ticket {
         id,
+        uid,
         title,
         status,
         assignee,
@@ -751,6 +774,62 @@ fn parse_ticket_file(path: &Path) -> Result<Ticket, String> {
         filename,
         filepath,
     })
+}
+
+/// Crockford base32, the alphabet ULIDs use. `I`, `L`, `O` and `U` are left
+/// out so an id read off a screen cannot be confused with `1`, `1`, `0` or each
+/// other.
+const ULID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Render 16 bytes as a 26-character Crockford base32 string, most significant
+/// bit first. 26 characters carry 130 bits, so the encoding starts with two
+/// padding bits and the first character only ever uses three of its five.
+fn encode_ulid(bytes: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(26);
+    let mut acc: u32 = 0;
+    let mut pending: u32 = 2;
+    for &b in bytes.iter() {
+        acc = ((acc << 8) | b as u32) & 0xfff;
+        pending += 8;
+        while pending >= 5 {
+            pending -= 5;
+            out.push(ULID_ALPHABET[((acc >> pending) & 0x1f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Lay out a ULID's 16 bytes: 48 bits of milliseconds, then 80 bits of
+/// entropy.
+fn ulid_bytes(ms: u64, random: [u8; 10]) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    for i in 0..6 {
+        bytes[i] = ((ms >> (8 * (5 - i))) & 0xff) as u8;
+    }
+    bytes[6..].copy_from_slice(&random);
+    bytes
+}
+
+/// A fresh ULID: a 48-bit millisecond timestamp followed by 80 random bits.
+///
+/// Lexicographic order matches creation order, which is what lets two clones
+/// that generated the same display id agree on which ticket came first. The
+/// random half is what keeps two tickets created in the same millisecond
+/// distinct.
+///
+/// Entropy is not optional here: a ticket without a unique identity is exactly
+/// the bug this exists to prevent, so an unavailable OS random source is an
+/// error rather than a quietly weaker id.
+fn new_ulid() -> Result<String, String> {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+        & 0xffff_ffff_ffff;
+    let mut random = [0u8; 10];
+    getrandom::fill(&mut random)
+        .map_err(|e| format!("no system entropy available for a ticket id: {}", e))?;
+    Ok(encode_ulid(&ulid_bytes(ms, random)))
 }
 
 fn next_ticket_id(dir: &Path) -> String {
@@ -849,17 +928,23 @@ fn read_ticket_raw(filename: String) -> Result<String, String> {
 
 #[tauri::command]
 fn create_ticket(input: CreateTicketInput) -> Result<Ticket, String> {
-    let dir = ensure_tickets_dir()?;
+    create_ticket_in(&ensure_tickets_dir()?, input)
+}
+
+/// Create a ticket inside `dir`. Separate from the command so tests can drive
+/// it against a temporary directory.
+fn create_ticket_in(dir: &Path, input: CreateTicketInput) -> Result<Ticket, String> {
     let title = input.title.trim();
     if title.is_empty() {
         return Err("title is required".to_string());
     }
-    let id = next_ticket_id(&dir);
-    let taken = list_taken_filenames(&dir);
+    let id = next_ticket_id(dir);
+    let taken = list_taken_filenames(dir);
     let filename = generate_filename(&id, title, &taken);
 
     let ticket = Ticket {
         id,
+        uid: Some(new_ulid()?),
         title: title.to_string(),
         status: input.status.unwrap_or_else(|| "backlog".to_string()),
         assignee: input.assignee.and_then(|s| {
@@ -883,8 +968,17 @@ fn create_ticket(input: CreateTicketInput) -> Result<Ticket, String> {
 
 #[tauri::command]
 fn update_ticket(filename: String, input: CreateTicketInput) -> Result<Ticket, String> {
-    let dir = ensure_tickets_dir()?;
-    let path = dir.join(&filename);
+    update_ticket_in(&ensure_tickets_dir()?, &filename, input)
+}
+
+/// Update a ticket inside `dir`. Separate from the command so tests can drive
+/// it against a temporary directory.
+fn update_ticket_in(
+    dir: &Path,
+    filename: &str,
+    input: CreateTicketInput,
+) -> Result<Ticket, String> {
+    let path = dir.join(filename);
     if !path.exists() {
         return Err(format!("file not found: {}", filename));
     }
@@ -895,6 +989,8 @@ fn update_ticket(filename: String, input: CreateTicketInput) -> Result<Ticket, S
     }
     let updated = Ticket {
         id: existing.id,
+        // A plain edit must never cost the ticket its identity.
+        uid: existing.uid,
         title: title.to_string(),
         status: input.status.unwrap_or(existing.status),
         assignee: input
@@ -978,6 +1074,120 @@ fn unlink_in_dir(dir: &Path, from: &str, to: &str) -> Result<Ticket, String> {
     ticket.last_updated = now_iso();
     atomic_write(&path, &render_frontmatter(&ticket))?;
     Ok(ticket)
+}
+
+/// An id collision that was repaired, so the app can tell the user about it.
+#[derive(Serialize, Debug, Clone)]
+pub struct IdRename {
+    pub from: String,
+    pub to: String,
+    /// The filename the ticket lives in now.
+    pub filename: String,
+}
+
+/// Total order deciding which of two tickets keeps a contested display id.
+///
+/// The older ticket wins. A file with no `uid` predates the identity scheme, so
+/// it sorts before any ticket that has one, and `last_updated` orders those.
+/// Tickets that do have a `uid` order by it, which is chronological because a
+/// ULID's leading bits are a timestamp. `filename` closes the comparison so the
+/// order is total: every clone has to pick the same winner, or they would keep
+/// renumbering each other's tickets forever.
+fn identity_key(t: &Ticket) -> (u8, &str, &str) {
+    match t.uid.as_deref() {
+        None => (0, t.last_updated.as_str(), t.filename.as_str()),
+        Some(uid) => (1, uid, t.filename.as_str()),
+    }
+}
+
+/// Repair tickets that ended up sharing a display id, which is what happens
+/// when two people create a ticket offline and then merge.
+///
+/// A loser keeps its `uid` - that is its identity, and it is what makes the
+/// decision above reproducible - and only its display id changes, together with
+/// its filename and every `links:` entry that pointed at it.
+///
+/// `last_updated` is deliberately left alone. Nobody edited these tickets; the
+/// app repaired a collision, and bumping the timestamp would both misreport
+/// authorship and reorder the board.
+fn reconcile_ticket_ids_in(dir: &Path) -> Result<Vec<IdRename>, String> {
+    let tickets = load_all_tickets(dir)?;
+
+    let mut by_id: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, ticket) in tickets.iter().enumerate() {
+        by_id.entry(ticket.id.as_str()).or_default().push(index);
+    }
+
+    let mut taken = list_taken_filenames(dir);
+    let mut next = tickets
+        .iter()
+        .filter_map(|t| t.id.strip_prefix("TKT-").and_then(|n| n.parse::<u64>().ok()))
+        .max()
+        .unwrap_or(999)
+        + 1;
+
+    // Decide everything before writing: a ticket can be renumbered *and* point
+    // at another renumbered ticket, and both facts have to land in one write.
+    let mut planned: Vec<(usize, String, String)> = vec![];
+    for group in by_id.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        let mut ordered = group.clone();
+        ordered.sort_by(|a, b| identity_key(&tickets[*a]).cmp(&identity_key(&tickets[*b])));
+        for &loser in &ordered[1..] {
+            let ticket = &tickets[loser];
+            let new_id = format!("TKT-{:04}", next);
+            next += 1;
+            let new_filename = generate_filename(&new_id, &ticket.title, &taken);
+            taken.push(new_filename.clone());
+            planned.push((loser, new_id, new_filename));
+        }
+    }
+    if planned.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let remap: BTreeMap<&str, &str> = planned
+        .iter()
+        .map(|(index, new_id, _)| (tickets[*index].id.as_str(), new_id.as_str()))
+        .collect();
+
+    let mut renames = vec![];
+    for (index, ticket) in tickets.iter().enumerate() {
+        let renaming = planned.iter().find(|(i, _, _)| *i == index);
+
+        let mut updated = ticket.clone();
+        if let Some((_, new_id, new_filename)) = renaming {
+            updated.id = new_id.clone();
+            updated.filename = new_filename.clone();
+            updated.filepath = dir.join(new_filename).to_string_lossy().to_string();
+            renames.push(IdRename {
+                from: ticket.id.clone(),
+                to: new_id.clone(),
+                filename: new_filename.clone(),
+            });
+        }
+
+        let mut relinked = false;
+        for link in updated.links.iter_mut() {
+            if let Some(new_id) = remap.get(link.as_str()) {
+                *link = (*new_id).to_string();
+                relinked = true;
+            }
+        }
+
+        if renaming.is_none() && !relinked {
+            continue;
+        }
+        if renaming.is_some() {
+            fs::rename(dir.join(&ticket.filename), dir.join(&updated.filename))
+                .map_err(|e| format!("could not rename {}: {}", ticket.filename, e))?;
+        }
+        atomic_write(&dir.join(&updated.filename), &render_frontmatter(&updated))?;
+    }
+
+    Ok(renames)
 }
 
 /// Add `to` to `from`'s `links`. The link is recorded on the source ticket
@@ -1395,6 +1605,19 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
 
     let head_sha = git_head(&dir).await?;
 
+    // Two people creating tickets offline can land on the same display id. The
+    // repair is written to the worktree and left there: the sync flow that
+    // asked for this pull commits and pushes local ticket changes right after,
+    // and committing from inside a pull would be a surprise. A failure here is
+    // reported but does not fail the pull, which did its own job.
+    let renamed_ids = match reconcile_ticket_ids_in(&tickets_dir()?) {
+        Ok(renamed) => renamed,
+        Err(e) => {
+            eprintln!("[gitteam] could not reconcile ticket ids: {}", e);
+            vec![]
+        }
+    };
+
     let files_changed = if commits_pulled > 0 {
         let files_output =
             run_git(&dir, &["log", "-n", &commits_pulled.to_string(), "--name-only", "--format="], 10, None)
@@ -1413,6 +1636,7 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
         head_sha,
         files_changed,
         commits_pulled,
+        renamed_ids,
     })
 }
 
@@ -2256,6 +2480,7 @@ mod tests {
             priority: "medium".to_string(),
             tags: vec!["ui".to_string()],
             links,
+            uid: None,
             last_updated: "2026-01-01T00:00:00Z".to_string(),
             body: "Body text\n".to_string(),
             filename: "TKT-1041-graph-links.md".to_string(),
@@ -2447,14 +2672,20 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         write_ticket(&dir, "TKT-2", &[]);
 
         let path = find_ticket_path_by_id(&dir, "TKT-1").unwrap();
-        let existing = parse_ticket_file(&path).unwrap();
-        let updated = Ticket {
-            title: "Renamed".to_string(),
-            last_updated: now_iso(),
-            links: existing.links,
-            ..existing
-        };
-        atomic_write(&path, &render_frontmatter(&updated)).unwrap();
+        let updated = update_ticket_in(
+            &dir,
+            "TKT-1.md",
+            CreateTicketInput {
+                title: "Renamed".to_string(),
+                status: None,
+                priority: None,
+                assignee: None,
+                tags: None,
+                body: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.filename, "TKT-1.md");
 
         let reread = parse_ticket_file(&path).unwrap();
         assert_eq!(reread.title, "Renamed");
@@ -2522,5 +2753,386 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         );
         assert!(deleted_in_worktree_from_porcelain("").is_empty());
         assert!(deleted_in_worktree_from_porcelain("?? only-untracked.md\n").is_empty());
+    }
+
+    // --- ticket identity ----------------------------------------------------
+
+    fn write_identity_ticket(
+        dir: &Path,
+        filename: &str,
+        id: &str,
+        uid: Option<&str>,
+        title: &str,
+        links: &[&str],
+    ) {
+        let mut t = sample_ticket(links.iter().map(|s| s.to_string()).collect());
+        t.id = id.to_string();
+        t.uid = uid.map(|u| u.to_string());
+        t.title = title.to_string();
+        t.filename = filename.to_string();
+        fs::write(dir.join(filename), render_frontmatter(&t)).unwrap();
+    }
+
+    #[test]
+    fn ulid_is_26_crockford_characters() {
+        let id = new_ulid().unwrap();
+        assert_eq!(id.len(), 26, "{}", id);
+        assert!(
+            id.bytes().all(|b| ULID_ALPHABET.contains(&b)),
+            "not crockford base32: {}",
+            id
+        );
+    }
+
+    #[test]
+    fn ulid_encoding_matches_the_spec_byte_layout() {
+        // Independently derived: the same 128-bit big-endian value encoded as 26
+        // base32 digits by a different algorithm. These pin the exact
+        // bytes-to-characters mapping, the part of the format that can never
+        // change afterwards without renumbering every uid in existence.
+        let ms: u64 = 0x0198_f2c1_7000;
+        let random = [
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x23, 0x45, 0x67,
+        ];
+        assert_eq!(
+            encode_ulid(&ulid_bytes(0, [0x00; 10])),
+            "00000000000000000000000000"
+        );
+        assert_eq!(
+            encode_ulid(&ulid_bytes(0xffff_ffff_ffff, [0xff; 10])),
+            "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"
+        );
+        assert_eq!(encode_ulid(&ulid_bytes(ms, random)), "01K3SC2W00NAXWSQFEZW0J6HB7");
+
+        // The timestamp is big-endian in the leading six bytes, so a wrong byte
+        // order would still sort correctly among ourselves while making every
+        // uid unreadable to anything else. Read it back the long way.
+        let bytes = ulid_bytes(ms, random);
+        let decoded = bytes[..6]
+            .iter()
+            .fold(0u64, |acc, b| (acc << 8) | *b as u64);
+        assert_eq!(decoded, ms);
+    }
+
+    #[test]
+    fn ulids_do_not_repeat() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            assert!(seen.insert(new_ulid().unwrap()), "duplicate ulid");
+        }
+    }
+
+    #[test]
+    fn ulid_order_matches_creation_order() {
+        let older = new_ulid().unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+        let newer = new_ulid().unwrap();
+        assert!(older < newer, "{} should sort before {}", older, newer);
+    }
+
+    #[test]
+    fn frontmatter_round_trip_preserves_uid() {
+        let path = temp_path("uid-round-trip.md");
+        let mut original = sample_ticket(vec![]);
+        original.uid = Some("01J8QK9W3M4N5P6Q7R8S9T0V1W".to_string());
+        fs::write(&path, render_frontmatter(&original)).unwrap();
+
+        let parsed = parse_ticket_file(&path).unwrap();
+        assert_eq!(parsed.uid.as_deref(), Some("01J8QK9W3M4N5P6Q7R8S9T0V1W"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_ticket_without_uid_parses_without_gaining_one() {
+        let path = temp_path("legacy-uid.md");
+        fs::write(
+            &path,
+            "---\nid: \"TKT-1041\"\ntitle: \"legacy\"\nstatus: \"backlog\"\nassignee: null\npriority: \"medium\"\ntags: []\nlast_updated: \"2026-01-01T00:00:00Z\"\n---\n\nBody\n",
+        )
+        .unwrap();
+
+        let parsed = parse_ticket_file(&path).unwrap();
+        assert_eq!(parsed.uid, None);
+        assert!(
+            !render_frontmatter(&parsed).contains("uid:"),
+            "rendering invented an identity"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    fn create_input(title: &str) -> CreateTicketInput {
+        CreateTicketInput {
+            title: title.to_string(),
+            status: None,
+            priority: None,
+            assignee: None,
+            tags: None,
+            body: None,
+        }
+    }
+
+    #[test]
+    fn create_ticket_gives_the_ticket_a_persisted_uid() {
+        let dir = unique_temp_dir("create-uid");
+        fs::create_dir_all(&dir).unwrap();
+
+        let created = create_ticket_in(&dir, create_input("Identity")).unwrap();
+
+        assert_eq!(created.id, "TKT-1000");
+        assert_eq!(created.uid.as_deref().map(str::len), Some(26));
+        let on_disk = parse_ticket_file(&dir.join(&created.filename)).unwrap();
+        assert_eq!(on_disk.uid, created.uid);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_ticket_keeps_the_uid() {
+        let dir = unique_temp_dir("update-keeps-uid");
+        fs::create_dir_all(&dir).unwrap();
+        write_identity_ticket(
+            &dir,
+            "TKT-1042.md",
+            "TKT-1042",
+            Some("01J8QK9W3M4N5P6Q7R8S9T0V1W"),
+            "Original",
+            &[],
+        );
+
+        let updated = update_ticket_in(&dir, "TKT-1042.md", create_input("Edited")).unwrap();
+
+        assert_eq!(updated.uid.as_deref(), Some("01J8QK9W3M4N5P6Q7R8S9T0V1W"));
+        let on_disk = parse_ticket_file(&dir.join("TKT-1042.md")).unwrap();
+        assert_eq!(on_disk.uid.as_deref(), Some("01J8QK9W3M4N5P6Q7R8S9T0V1W"));
+        assert_eq!(on_disk.title, "Edited");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconcile_renumbers_the_newer_ticket_and_rewrites_links() {
+        let dir = unique_temp_dir("reconcile-renumber");
+        fs::create_dir_all(&dir).unwrap();
+        let older = "01J8QK9W3M0000000000000000";
+        let newer = "01J8QK9W3MZZZZZZZZZZZZZZZZ";
+        // Two people created TKT-1042 offline. The older one keeps the number.
+        write_identity_ticket(&dir, "TKT-1042-first.md", "TKT-1042", Some(older), "First", &[]);
+        write_identity_ticket(&dir, "TKT-1042-second.md", "TKT-1042", Some(newer), "Second", &[]);
+        // A third points at the contested id; a fourth is uninvolved.
+        write_identity_ticket(
+            &dir,
+            "TKT-1041-refs.md",
+            "TKT-1041",
+            Some("01J8QK9W3M1111111111111111"),
+            "Refs",
+            &["TKT-1042"],
+        );
+        write_identity_ticket(
+            &dir,
+            "TKT-1000-other.md",
+            "TKT-1000",
+            Some("01J8QK9W3M2222222222222222"),
+            "Other",
+            &[],
+        );
+
+        let renames = reconcile_ticket_ids_in(&dir).unwrap();
+
+        assert_eq!(renames.len(), 1, "{:?}", renames);
+        assert_eq!(renames[0].from, "TKT-1042");
+        assert_eq!(renames[0].to, "TKT-1043");
+        assert_eq!(renames[0].filename, "TKT-1043-second.md");
+
+        // The older ticket keeps both its id and its file.
+        let kept = parse_ticket_file(&dir.join("TKT-1042-first.md")).unwrap();
+        assert_eq!(kept.id, "TKT-1042");
+        assert_eq!(kept.uid.as_deref(), Some(older));
+
+        assert!(
+            !dir.join("TKT-1042-second.md").exists(),
+            "the superseded file is still on disk"
+        );
+        let loser = parse_ticket_file(&dir.join("TKT-1043-second.md")).unwrap();
+        assert_eq!(loser.id, "TKT-1043");
+        assert_eq!(
+            loser.uid.as_deref(),
+            Some(newer),
+            "identity must survive renumbering"
+        );
+
+        // The reference follows the ticket it pointed at.
+        let referrer = parse_ticket_file(&dir.join("TKT-1041-refs.md")).unwrap();
+        assert_eq!(referrer.links, vec!["TKT-1043".to_string()]);
+
+        // Nothing unrelated was rewritten.
+        let other = parse_ticket_file(&dir.join("TKT-1000-other.md")).unwrap();
+        assert_eq!(other.uid.as_deref(), Some("01J8QK9W3M2222222222222222"));
+        assert!(other.links.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconcile_leaves_a_unique_id_set_alone() {
+        let dir = unique_temp_dir("reconcile-noop");
+        fs::create_dir_all(&dir).unwrap();
+        write_identity_ticket(
+            &dir,
+            "TKT-1000-a.md",
+            "TKT-1000",
+            Some("01J8QK9W3M1111111111111111"),
+            "A",
+            &[],
+        );
+        write_identity_ticket(
+            &dir,
+            "TKT-1001-b.md",
+            "TKT-1001",
+            Some("01J8QK9W3M2222222222222222"),
+            "B",
+            &[],
+        );
+
+        assert!(reconcile_ticket_ids_in(&dir).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconcile_lets_a_legacy_ticket_keep_a_contested_id() {
+        // A file with no uid predates the identity scheme, so it is the older of
+        // the two and keeps the number.
+        let dir = unique_temp_dir("reconcile-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        write_identity_ticket(&dir, "TKT-1042-legacy.md", "TKT-1042", None, "Legacy", &[]);
+        write_identity_ticket(
+            &dir,
+            "TKT-1042-new.md",
+            "TKT-1042",
+            Some("01J8QK9W3M1111111111111111"),
+            "New",
+            &[],
+        );
+
+        let renames = reconcile_ticket_ids_in(&dir).unwrap();
+
+        assert_eq!(renames.len(), 1, "{:?}", renames);
+        assert_eq!(renames[0].to, "TKT-1043");
+        let kept = parse_ticket_file(&dir.join("TKT-1042-legacy.md")).unwrap();
+        assert_eq!(kept.uid, None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=GitTeam Test"])
+            .args(["-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git could not be started");
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}{}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn two_clones_that_created_the_same_id_converge_after_a_real_merge() {
+        // The end-to-end case this whole scheme exists for, driven through real
+        // git: a bare repository the test owns (so it is genuinely offline), two
+        // clones, and one ticket created in each while they cannot see each
+        // other. Both land on TKT-1000.
+        let root = unique_temp_dir("two-clones");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let remote = root.join("remote.git");
+        git_in(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
+
+        let seed = root.join("seed");
+        git_in(&root, &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()]);
+        fs::write(seed.join("README.md"), "board\n").unwrap();
+        git_in(&seed, &["add", "README.md"]);
+        git_in(&seed, &["commit", "-q", "-m", "init"]);
+        git_in(&seed, &["push", "-q", "origin", "HEAD"]);
+
+        let alice = root.join("alice");
+        let bob = root.join("bob");
+        for who in [&alice, &bob] {
+            git_in(&root, &["clone", "-q", remote.to_str().unwrap(), who.to_str().unwrap()]);
+        }
+
+        // Alice goes first so her uid is the older one.
+        let alice_ticket = create_ticket_in(&alice, create_input("Shared board")).unwrap();
+        assert_eq!(alice_ticket.id, "TKT-1000");
+        git_in(&alice, &["add", "-A"]);
+        git_in(&alice, &["commit", "-q", "-m", "alice ticket"]);
+        git_in(&alice, &["push", "-q"]);
+
+        // Bob was working offline: same id, different ticket, and his own
+        // second ticket already points at it.
+        let bob_ticket = create_ticket_in(&bob, create_input("Bob's ticket")).unwrap();
+        assert_eq!(bob_ticket.id, "TKT-1000", "the collision must be reproduced");
+        let bob_second = create_ticket_in(&bob, create_input("Bob's follow-up")).unwrap();
+        assert_eq!(bob_second.id, "TKT-1001");
+        link_in_dir(&bob, "TKT-1001", "TKT-1000").unwrap();
+        git_in(&bob, &["add", "-A"]);
+        git_in(&bob, &["commit", "-q", "-m", "bob tickets"]);
+
+        // Different filenames, so the merge itself is clean and git reports no
+        // conflict: the two files simply coexist, both claiming TKT-1000.
+        git_in(&bob, &["pull", "-q", "--rebase", "--autostash"]);
+        let after_merge = load_all_tickets(&bob).unwrap();
+        assert_eq!(
+            after_merge.iter().filter(|t| t.id == "TKT-1000").count(),
+            2,
+            "the merge should leave two tickets claiming TKT-1000"
+        );
+
+        // Alice's ticket is older, so she keeps the id.
+        let renames = reconcile_ticket_ids_in(&bob).unwrap();
+        assert_eq!(renames.len(), 1, "{:?}", renames);
+        assert_eq!(renames[0].from, "TKT-1000");
+        assert_eq!(renames[0].to, "TKT-1002");
+
+        let bob_dir_id = load_all_tickets(&bob)
+            .unwrap()
+            .iter()
+            .find(|t| t.uid == bob_ticket.uid)
+            .map(|t| t.id.clone())
+            .unwrap();
+        assert_eq!(bob_dir_id, "TKT-1002", "Bob's ticket was the one renumbered");
+        let referrer = parse_ticket_file(&find_ticket_path_by_id(&bob, "TKT-1001").unwrap()).unwrap();
+        assert_eq!(
+            referrer.links,
+            vec!["TKT-1002".to_string()],
+            "Bob's own reference followed his ticket"
+        );
+
+        // The repair propagates, and the other clone agrees without having to
+        // change anything of its own.
+        git_in(&bob, &["add", "-A"]);
+        git_in(&bob, &["commit", "-q", "-m", "repair colliding ids"]);
+        git_in(&bob, &["push", "-q"]);
+        git_in(&alice, &["pull", "-q", "--rebase", "--autostash"]);
+
+        assert!(
+            reconcile_ticket_ids_in(&alice).unwrap().is_empty(),
+            "Alice must not renumber anything after her pull"
+        );
+        let alice_view = load_all_tickets(&alice).unwrap();
+        assert_eq!(alice_view.len(), 3);
+        assert_eq!(
+            alice_view.iter().filter(|t| t.id == "TKT-1000").count(),
+            1,
+            "exactly one ticket owns TKT-1000 once both clones converged"
+        );
+        // Alice's ticket is untouched and still hers.
+        let alice_now = alice_view.iter().find(|t| t.uid == alice_ticket.uid).unwrap();
+        assert_eq!(alice_now.id, "TKT-1000");
+        assert_eq!(alice_now.filepath, alice_ticket.filepath);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

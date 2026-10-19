@@ -3,6 +3,11 @@ export type TicketPriority = "low" | "medium" | "high" | "urgent";
 
 export interface Ticket {
   id: string;
+  /**
+   * Stable identity behind the display id. Optional because tickets written
+   * before the scheme existed have none.
+   */
+  uid: string | null;
   title: string;
   status: TicketStatus;
   assignee: string | null;
