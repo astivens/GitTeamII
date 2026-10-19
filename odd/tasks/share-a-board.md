@@ -4,7 +4,7 @@ Objetivo: que dos o más personas compartan un board de tickets sin que nadie te
 
 Rama: `fase-6-v2-redesign` (tracker) · Runner: `cargo test` (Rust) y `npx tsc --noEmit` + `pnpm build` (frontend; no hay runner de tests JS) · Entrega: work-unit commits; el PR se decide cuando el usuario lo pida.
 
-Este documento es **diseño**: todavía no se escribió código. Falta el OK del usuario sobre las specs para arrancar por T1.
+Estado: el usuario aprobó las specs y **T1 (con T2) está implementado** (`3fa2b1e` + `a7b8cc8`). T3–T7 siguen pendientes. El diseño no cambió al implementar salvo donde el Log lo dice.
 
 ## Specs
 
@@ -42,8 +42,8 @@ Este documento es **diseño**: todavía no se escribió código. Falta el OK del
 
 | ID | Specs | Qué | Ruta | Estado |
 |----|-------|-----|------|--------|
-| T1 | S2 | Cliente HTTP + `board_create` (repo privado, linkeo del proyecto) | inline | pendiente |
-| T2 | S2 | Errores por scope faltante y por nombre tomado | inline | pendiente |
+| T1 | S2 | Cliente HTTP + `board_create` (repo privado, linkeo del proyecto) | inline | **hecho** `3fa2b1e` + `a7b8cc8` |
+| T2 | S2 | Errores por scope faltante y por nombre tomado | inline | **hecho** dentro de T1 (`3fa2b1e` + `a7b8cc8`) |
 | T3 | S3 | Generar y parsear el link de invitación (UI de copiar/pegar) | inline | pendiente |
 | T4 | S4 | Flujo "Unirme a un board" (clonar con el PAT del que entra) | inline | pendiente |
 | T5 | S5 | Invitar por `@usuario` + aceptar invitaciones pendientes | inline | pendiente |
@@ -59,8 +59,27 @@ T1 también resuelve el riesgo diario de L9: con `board_create` el proyecto vivo
 3. **`git` sigue haciendo el trabajo pesado**: el cliente HTTP sólo crea el repo y administra colaboradores. Nada del sync cambia.
 4. **El link sirve por las dos vías** (deep link y pegado a mano) porque en Linux el esquema depende del entorno de escritorio y el flujo no puede depender de eso.
 5. **El pedido de acceso usa el mensajero que el usuario ya tiene**: es la parte "como wpp" de la visión — el canal social ya existe, nosotros no lo reemplazamos.
+6. **El cliente HTTP es `reqwest` con `rustls`**, promovido del grafo de tauri (ya estaba ahí, sin backend TLS, así que lo nuevo son rustls y su provider). Se evaluó hacer las llamadas con `fetch` desde el webview —cero dependencias nuevas— y se descartó: T5 necesita el PAT del keyring, que vive del lado Rust, así que el cliente tenía que estar ahí de todos modos. Consecuencia de build: `rustls` usa el provider aws-lc-rs, que compila una librería C y quiere `cmake` y un toolchain de C (Linux ya los necesita para tauri); no usa el OpenSSL del sistema, a diferencia de `native-tls`.
 
 ## Log
 
 - **L1 (2026-10-18)** — Pedido verbatim del usuario para este bloque: *"Invitación: la app crea el repo y da el link"* (elegido entre tres opciones). Visión de producto, verbatim: *"Lo que quiero como tal es una app que haga bien todo lo que no hacen notion, jira, trello, etc, pero free, para eso, necesitamos una forma gratuita de comunicar/enlazar esto con otros usuarios sin tener que proveer un servidor web ni nada, sino permitir que se comuniquen como wpp, como pin, etc"*.
 - **L2 (2026-10-18)** — Diseño escrito, sin código. El transporte de colaboración (git + merge driver) ya existe; el trabajo es entrada, permisos e identidad. Pendiente: OK del usuario sobre las specs para arrancar por T1.
+- **L3 (2026-10-18)** — OK del usuario, verbatim: *"T1: que la app cree tu board"*. Alcance autorizado: **T1** (S2).
+- **L4 (2026-10-18)** — **T1 implementado** (`3fa2b1e`, 739 inserciones / 150 borrados en 7 archivos; por encima del heurístico de ~400 líneas, y es deliberado: el comando sin su punto de entrada no es una rebanada revisable de nada, y el defecto de `App.tsx` que el punto de entrada destapa está entrelazado con la reescritura de `SetupScreen`).
+
+  Backend: `board_create(BoardCreateInput)` crea un repo **privado** con `auto_init` (un repo vacío no tiene rama por defecto y el clone que sigue no podría hacer checkout de nada), reintenta con sufijo numérico sólo ante nombre tomado (422 + `already exists`), y linkea el resultado por `add_project`, o sea por el mismo camino que cualquier otro proyecto: **no se agregó ningún camino nuevo de clone**. Si el linkeo falla después de crear el repo, el error dice que el repo **ya existe** y en qué URL, porque el efecto remoto ya ocurrió y el usuario no puede quedarse sin saberlo.
+
+  Decisión que S2 dejaba abierta: la credencial y la identidad git caen al proyecto activo cuando el usuario no las escribe, así armar un board sobre un proyecto existente es un solo click — el caso concreto que motivó L9, donde el proyecto vivo todavía apunta al repo de la app.
+
+  Se encontró y arregló un **defecto pre-existente** del que depende el punto de entrada: `setupForced` se limpiaba en cuanto hubiera *cualquier* proyecto activo, así que la pantalla de setup on-demand se cerraba en el mismo instante en que se abría y el CTA "Link new repository" quedaba muerto mientras hubiera un board abierto. Ahora se cierra cuando el proyecto activo **cambia** (envío exitoso) y hasta entonces ofrece volver.
+
+  Evidencia: RED primero (los tests del núcleo puro no compilaban: las funciones no existían), luego **57 tests de unidad + 2 de integración en verde**, `npx tsc --noEmit` en 0 y `pnpm build` en 0. RED por mutación: neutralizar la rama que detecta el scope faltante hace caer el test del scope, y sólo ése.
+
+  Límite honesto: la llamada a la API de GitHub no se puede ejercer sin red ni cuenta, así que está cubierta por tests de unidad sólo en sus decisiones puras (nombre por defecto y saneado, candidatos ante nombre tomado, mensaje de error por status y scope, elección de credencial e identidad), y la llamada quedó delgada a propósito. `Risk: item 5` (dependencia nueva directa) e `item 6` (la llamada no la cubre ningún test).
+- **L5 (2026-10-18)** — Observación que **no** introduce este cambio: `src-tauri/Cargo.lock` está en `.gitignore` (`.gitignore:28`), así que la resolución exacta de la dependencia nueva no queda en el repo, y el `cmake` + toolchain de C que pide `aws-lc-rs` no está documentado en ningún lado para quien compile. Para una app que se distribuye como binario, versionar el lock es lo recomendable; queda como pendiente para que lo decida el usuario (no lo toqué).
+- **L6 (2026-10-18)** — **Verificación independiente de T1** (verificador fresco, alcance `1cf073c..3fa2b1e`): **cero blockers**. Pasaron `cargo test` (57+2 en ese momento), `npx tsc --noEmit`, `pnpm build`, y los invariantes por lectura: un solo camino de clone (`board_create` → `add_project` → `setup_repo_inner`), `private: true`, `auto_init: true`, sólo el nombre tomado se reintenta y todo lo demás se corta al primer error, el header de scopes se lee y su ausencia está contemplada, y `adoptActiveProject` es un movimiento literal del cuerpo que reemplazó (o sea: el flujo de "conectar un repo existente" no cambió de comportamiento). La cadena publicada quedó intacta y el árbol limpio después de las pruebas.
+
+  El hallazgo que importaba, y que arreglé en `a7b8cc8`: **mutar `"private": true` a `false` no hacía caer ningún test** — la promesa de S6 ("boards privados por defecto") no tenía red, porque el payload sólo existía como literal dentro de la función que hace la llamada. Ahora el cuerpo sale de `board_create_body` y un test lo fija, junto con `auto_init`. RED por mutación confirmado *después* del arreglo (antes escapaba, ahora cae). En el mismo commit entraron sus 3 tests de regresión y una corrección al mensaje de scope: cuando el header **no viene**, no se puede afirmar que al token le falten permisos —los fine-grained no reportan scopes—, así que el mensaje dice qué hace falta para crear un repo en vez de afirmar lo que el token tiene.
+
+  Advisory que **no** se tocó, con motivo: el reintento sólo ante nombre tomado no tiene test propio porque el loop vive en el comando async y no hay costura sin inventar una abstracción de más; el verificador lo probó por mutación (`(&base, 4)` → `(&base, 1)` pasa la suite). Es exactamente el límite que declara `Risk: item 6`. Quedan como advertencias abiertas, sin acción en este cambio: no hay tope de 100 caracteres en el saneado del nombre (un nombre larguísimo da un 422 que se informa tal cual, sin reintento) y el `Cargo.lock` sin versionar (L5). Lo que no se pudo verificar y no se afirma: la llamada real a la API de GitHub (sin red ni cuenta) y el comportamiento en runtime de la UI (no hay runner de tests JS en el repo).
