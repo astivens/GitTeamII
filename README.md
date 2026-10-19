@@ -47,7 +47,7 @@ GitTeam inverts that:
 | **Tickets as Markdown** | Frontmatter (id, status, assignee, priority, tags, links) plus a free-form body. The same file in the app, in your editor, in Git and in a prompt. |
 | **Kanban board and graph** | A board grouped by status, and an Obsidian-style force graph of the `links:` between tickets. Hover highlights neighbours, drag moves a node, click opens the ticket. |
 | **Keyboard first** | `⌘K` command palette, `N` new ticket, `Y` copy the last viewed ticket id, `G` `K` board / `G` `G` graph, `?` shortcut help. |
-| **Copy for AI** | **Copiar para IA** copies the raw Markdown of a ticket, ready to paste into any assistant. |
+| **Copy for AI** | The copy button puts the raw Markdown of a ticket on the clipboard, ready to paste into any assistant. |
 | **Local-first** | Full offline create/edit/delete. The network is used only to sync the repository. |
 | **Automatic sync** | Edits are debounced, a background watcher polls the remote every 15 seconds, and focusing the window pulls pending changes. |
 | **Conflict handling** | Ticket files are merged field by field by a custom Git merge driver. When a merge cannot be resolved, a side-by-side preview shows local vs. remote per file, with local / remote / both per file. |
@@ -55,6 +55,7 @@ GitTeam inverts that:
 | **Share from the app** | Create a tickets repository, invite a collaborator by GitHub username, or copy an invitation link. |
 | **Deep link** | `gitteam://join?…` opens the app on the join flow. |
 | **Themes** | Three token sets — `default` (dark), `light` and `obsidian` — switchable from the header and remembered locally. |
+| **Bilingual interface** | English and Spanish, switchable from the header, detected from your system language and remembered locally. Git and backend diagnostics stay in English. |
 | **No telemetry** | No analytics and no outbound calls other than the Git remote you configured. |
 
 ## How collaboration works
@@ -113,7 +114,8 @@ Once connected, press `N` to create your first ticket.
 | Create a ticket | `N`, or the **New ticket** button |
 | Search / navigate / sync | `⌘K` (or `Ctrl+K`) |
 | Copy a ticket id | Open a ticket and press `Y` (copies the last viewed id) |
-| Copy a ticket for an AI assistant | **Copiar para IA** inside the ticket |
+| Copy a ticket for an AI assistant | **Copy for AI** inside the ticket |
+| Change language | The **EN / ES** switch in the header |
 | Switch between board and graph | The **Board / Graph** toggle in the header, or `G` `K` / `G` `G` |
 | Change theme | The three theme buttons in the header |
 | Switch board | The project menu in the header |

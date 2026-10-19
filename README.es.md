@@ -55,6 +55,7 @@ GitTeam invierte eso:
 | **Compartir desde la aplicación** | Crear un repositorio de tickets, invitar a un colaborador por su usuario de GitHub o copiar un enlace de invitación. |
 | **Enlace profundo** | `gitteam://join?…` abre la aplicación directamente en el flujo de unirse. |
 | **Temas** | Tres conjuntos de tokens — `default` (oscuro), `light` y `obsidian` — conmutables desde la cabecera y recordados localmente. |
+| **Interfaz bilingüe** | Inglés y español, conmutables desde la cabecera, detectados del idioma del sistema y recordados localmente. Los diagnósticos de Git y del backend se mantienen en inglés. |
 | **Sin telemetría** | Sin analítica y sin llamadas salientes más allá del remoto Git que hayas configurado. |
 
 ## Cómo funciona la colaboración
@@ -117,7 +118,8 @@ Una vez conectado, pulsa `N` para crear tu primer ticket.
 | Cambiar entre tablero y grafo | El selector **Tablero / Grafo** de la cabecera, o `G` `K` / `G` `G` |
 | Cambiar de tema | Los tres botones de tema de la cabecera |
 | Cambiar de tablero | El menú de proyectos de la cabecera |
-| Sincronizar ahora | El botón de sincronizar de la cabecera (*Sync now*); las ediciones también se sincronizan solas |
+| Sincronizar ahora | El botón de sincronizar de la cabecera (*Sincronizar*); las ediciones también se sincronizan solas |
+| Cambiar de idioma | El selector **EN / ES** de la cabecera |
 
 Los ids de ticket son cortos (`TKT-1042`), así que resultan baratos de pegar en un mensaje de commit, en un chat o en un prompt.
 
