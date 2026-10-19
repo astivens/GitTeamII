@@ -8,6 +8,7 @@ import type {
   GitConfig,
   GitStatus,
   InviteDetails,
+  PendingInvitation,
   Project,
   PullResult,
   PushResult,
@@ -55,6 +56,37 @@ export async function boardInviteLink(): Promise<string> {
  */
 export async function boardParseInvite(text: string): Promise<InviteDetails> {
   return invoke<InviteDetails>("board_parse_invite", { text });
+}
+
+/**
+ * Gives a GitHub user access to the active board, by their user name. It is the
+ * owner's action, and the invitation stays pending until the other person
+ * accepts it on GitHub.
+ */
+export async function boardInviteCollaborator(username: string): Promise<string> {
+  return invoke<string>("board_invite_collaborator", { username });
+}
+
+/**
+ * The invitations GitHub has pending for whoever owns this token. With a
+ * repository url, only the invitation for that board comes back.
+ */
+export async function githubPendingInvitations(
+  pat: string,
+  repoUrl?: string,
+): Promise<PendingInvitation[]> {
+  return invoke<PendingInvitation[]>("github_pending_invitations", {
+    pat,
+    repoUrl: repoUrl ?? null,
+  });
+}
+
+/** Accepts a pending invitation, so joining does not depend on GitHub's mail. */
+export async function githubAcceptInvitation(
+  pat: string,
+  invitationId: number,
+): Promise<void> {
+  return invoke<void>("github_accept_invitation", { pat, invitationId });
 }
 
 export async function removeProject(projectId: string): Promise<void> {

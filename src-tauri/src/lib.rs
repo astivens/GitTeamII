@@ -3000,30 +3000,23 @@ async fn github_create_repo(pat: &str, name: &str) -> Result<String, GithubError
         retryable: false,
         message,
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| fatal(format!("could not start the HTTP client: {}", e)))?;
+    let client = github_client().map_err(fatal)?;
 
     let body = board_create_body(name).to_string();
 
-    let response = client
-        .post("https://api.github.com/user/repos")
-        .header("Authorization", format!("Bearer {}", pat))
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "gitteam")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| fatal(format!("could not reach GitHub: {}", e)))?;
+    let response = github_request(
+        &client,
+        reqwest::Method::POST,
+        "https://api.github.com/user/repos",
+        pat,
+    )
+    .body(body)
+    .send()
+    .await
+    .map_err(|e| fatal(format!("could not reach GitHub: {}", e)))?;
 
     let status = response.status().as_u16();
-    let scopes = response
-        .headers()
-        .get("x-oauth-scopes")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
+    let scopes = oauth_scopes(&response);
     let text = response.text().await.unwrap_or_default();
 
     if (200..300).contains(&status) {
@@ -3264,6 +3257,352 @@ fn board_parse_invite(text: String) -> Result<InviteDetails, String> {
     parse_invite_link(&text)
 }
 
+// ----- Compartir un board: el acceso lo otorga el dueño, por @usuario -----
+
+/// One place for the HTTP client GitHub's calls share, so the timeout is
+/// decided once instead of in every call.
+fn github_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("could not start the HTTP client: {}", e))
+}
+
+/// The headers every GitHub call carries, as data rather than as a chain of
+/// calls, so the contract can be pinned by a test.
+fn github_headers(pat: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("Authorization", format!("Bearer {}", pat)),
+        ("Accept", "application/vnd.github+json".to_string()),
+        ("X-GitHub-Api-Version", "2022-11-28".to_string()),
+        ("User-Agent", "gitteam".to_string()),
+    ]
+}
+
+fn github_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    pat: &str,
+) -> reqwest::RequestBuilder {
+    let mut request = client.request(method, url);
+    for (name, value) in github_headers(pat) {
+        request = request.header(name, value);
+    }
+    request
+}
+
+/// The scopes GitHub reports on a response, when it reports them: fine-grained
+/// tokens say nothing, which is why their absence proves nothing.
+fn oauth_scopes(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get("x-oauth-scopes")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string())
+}
+
+/// A GitHub user name as the person typed or pasted it, normalized, and refused
+/// with a reason when GitHub could not have it. Saying why here beats spending a
+/// call to be told.
+fn normalize_github_username(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_start_matches('@').trim();
+    if trimmed.is_empty() {
+        return Err("Enter the GitHub user name to invite.".to_string());
+    }
+    if trimmed.len() > 39 {
+        return Err("A GitHub user name has at most 39 characters.".to_string());
+    }
+    if trimmed.starts_with('-') || trimmed.ends_with('-') || trimmed.contains("--") {
+        return Err(format!(
+            "@{} is not a GitHub user name: it cannot begin or end with a hyphen, or repeat one.",
+            trimmed
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(format!(
+            "@{} is not a GitHub user name: only letters, digits and hyphens.",
+            trimmed
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// The full name `owner/repo` of a GitHub remote, which is how the API names it.
+/// `None` when the remote is not on GitHub: granting access by user name is a
+/// GitHub operation, and elsewhere there is nothing to ask.
+fn repo_full_name(repo_url: &str) -> Option<String> {
+    let trimmed = repo_url.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("ssh://"))
+        .or_else(|| trimmed.strip_prefix("git@"))
+        .unwrap_or(trimmed);
+
+    // The scp form has no scheme and separates host from path with a colon.
+    let (authority, path) = match without_scheme.split_once(':') {
+        Some((authority, path)) if !trimmed.contains("://") => (authority, path),
+        _ => without_scheme.split_once('/')?,
+    };
+
+    // A remote that kept a credential carries it in the authority, and a host can
+    // come with a port: the repository's name needs neither.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+
+    let path = path.trim_start_matches('/').trim_end_matches(".git");
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    Some(format!("{}/{}", owner, name))
+}
+
+/// The body of the add-collaborator call: write access, which is what working on
+/// a board needs. Its own function so the promise is pinned by a test.
+fn collaborator_invite_body() -> serde_json::Value {
+    serde_json::json!({ "permission": "push" })
+}
+
+/// What to say when the call succeeded. GitHub answers 201 when it created an
+/// invitation and 204 when the user was already a collaborator: two different
+/// situations for whoever is looking at the screen.
+fn collaborator_result_message(status: u16, username: &str) -> String {
+    if status == 201 {
+        format!(
+            "Invitation sent to @{}: they have to accept it on GitHub before the clone works.",
+            username
+        )
+    } else {
+        format!("@{} already has access to this board.", username)
+    }
+}
+
+/// The error of the add-collaborator call, with the one case that has a name of
+/// its own: a user GitHub does not have. Everything else is explained by the
+/// general mapping, which reads the body.
+fn collaborator_error_message(
+    status: u16,
+    oauth_scopes: Option<&str>,
+    body: &str,
+    username: &str,
+) -> String {
+    match status {
+        404 => format!(
+            "GitHub has no user called @{}. Check the spelling of their user name.",
+            username
+        ),
+        401 => "GitHub rejected the token. It may be expired or revoked: create a new one and try again."
+            .to_string(),
+        403 => {
+            // The general mapping explains a 403 in terms of creating a
+            // repository, which is not what this call does. Granting access has
+            // its own reasons for being refused, so it says its own thing.
+            let scopes = oauth_scopes.unwrap_or("").trim();
+            let need = if scopes.is_empty() {
+                "Granting access needs a token that can manage this repository: the owner's."
+            } else {
+                "The token is missing the `repo` scope, which granting access needs."
+            };
+            format!(
+                "GitHub refused to give @{} access to this board. {} (Scopes it has: {}.)",
+                username,
+                need,
+                if scopes.is_empty() { "none reported" } else { scopes }
+            )
+        }
+        _ => github_api_error(status, oauth_scopes, body),
+    }
+}
+
+/// An invitation waiting on the invitee's side.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PendingInvitation {
+    pub id: u64,
+    /// The full name `owner/repo`, which is how GitHub names it.
+    pub repo: String,
+    /// Who sent it, when GitHub says.
+    pub from: Option<String>,
+}
+
+/// Reads what GitHub answers on `GET /user/repository_invitations`. An
+/// invitation without a repository cannot be used for anything, so it is not
+/// turned into something half-formed: it is reported.
+fn pending_invitations_from_json(body: &str) -> Result<Vec<PendingInvitation>, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("GitHub answered with something unreadable: {}", e))?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "GitHub did not answer with a list of invitations.".to_string())?;
+
+    let mut invitations = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "An invitation from GitHub came without an identifier.".to_string())?;
+        let repo = item
+            .get("repository")
+            .and_then(|v| v.get("full_name"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "An invitation from GitHub came without a repository.".to_string())?;
+        let from = item
+            .get("inviter")
+            .and_then(|v| v.get("login"))
+            .and_then(|v| v.as_str())
+            .map(|login| login.to_string());
+        invitations.push(PendingInvitation {
+            id,
+            repo: repo.to_string(),
+            from,
+        });
+    }
+    Ok(invitations)
+}
+
+/// The invitation that belongs to this board, if it is among the pending ones.
+/// GitHub does not distinguish case in repository names.
+fn invitation_for_repo<'a>(
+    invitations: &'a [PendingInvitation],
+    repo: &str,
+) -> Option<&'a PendingInvitation> {
+    invitations
+        .iter()
+        .find(|invitation| invitation.repo.eq_ignore_ascii_case(repo))
+}
+
+/// Gives a GitHub user access to the board, by their user name (S5). It is the
+/// owner's action: the credential is the active project's, and the invitation
+/// stays pending until the other person accepts it.
+#[tauri::command]
+async fn board_invite_collaborator(username: String) -> Result<String, String> {
+    let config = read_git_config()?
+        .ok_or_else(|| "There is no active board to invite anyone to.".to_string())?;
+    let repo = repo_full_name(&config.repo_url).ok_or_else(|| {
+        "This board's repository is not on GitHub, so its access cannot be granted from here."
+            .to_string()
+    })?;
+    let username = normalize_github_username(&username)?;
+    let pat = choose_board_pat(None, load_pat().ok()).map_err(|_| {
+        "This board has no saved GitHub token, so access cannot be granted from here.".to_string()
+    })?;
+
+    let client = github_client()?;
+    let response = github_request(
+        &client,
+        reqwest::Method::PUT,
+        &format!(
+            "https://api.github.com/repos/{}/collaborators/{}",
+            repo, username
+        ),
+        &pat,
+    )
+    .body(collaborator_invite_body().to_string())
+    .send()
+    .await
+    .map_err(|e| format!("Could not reach GitHub: {}", e))?;
+
+    let status = response.status().as_u16();
+    let scopes = oauth_scopes(&response);
+    let text = response.text().await.unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        return Ok(collaborator_result_message(status, &username));
+    }
+    Err(collaborator_error_message(
+        status,
+        scopes.as_deref(),
+        &text,
+        &username,
+    ))
+}
+
+/// The invitations GitHub has pending for whoever owns this credential. The
+/// invitee looks them up with **their** token: the invitation is on their
+/// account (S5). With a repository url, only the invitation for that board comes
+/// back: joining a board does not need the rest of the list.
+#[tauri::command]
+async fn github_pending_invitations(
+    pat: String,
+    repo_url: Option<String>,
+) -> Result<Vec<PendingInvitation>, String> {
+    let pat = pat.trim().to_string();
+    if pat.is_empty() {
+        return Err("Your GitHub token is needed to look up your invitations.".to_string());
+    }
+
+    let client = github_client()?;
+    let response = github_request(
+        &client,
+        reqwest::Method::GET,
+        "https://api.github.com/user/repository_invitations",
+        &pat,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Could not reach GitHub: {}", e))?;
+
+    let status = response.status().as_u16();
+    let scopes = oauth_scopes(&response);
+    let text = response.text().await.unwrap_or_default();
+
+    if !(200..300).contains(&status) {
+        return Err(github_api_error(status, scopes.as_deref(), &text));
+    }
+
+    let invitations = pending_invitations_from_json(&text)?;
+    match repo_url.as_deref().map(repo_full_name) {
+        Some(Some(repo)) => Ok(invitation_for_repo(&invitations, &repo)
+            .cloned()
+            .into_iter()
+            .collect()),
+        Some(None) => Err(
+            "This board's repository is not on GitHub, so there is no invitation to look for."
+                .to_string(),
+        ),
+        None => Ok(invitations),
+    }
+}
+
+/// Accepts a pending invitation. Without this, accepting depends on the mail
+/// GitHub sends, and the flow should not depend on a mail (S5).
+#[tauri::command]
+async fn github_accept_invitation(pat: String, invitation_id: u64) -> Result<(), String> {
+    let pat = pat.trim().to_string();
+    if pat.is_empty() {
+        return Err("Your GitHub token is needed to accept an invitation.".to_string());
+    }
+
+    let client = github_client()?;
+    let response = github_request(
+        &client,
+        reqwest::Method::PATCH,
+        &format!(
+            "https://api.github.com/user/repository_invitations/{}",
+            invitation_id
+        ),
+        &pat,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Could not reach GitHub: {}", e))?;
+
+    let status = response.status().as_u16();
+    let scopes = oauth_scopes(&response);
+    let text = response.text().await.unwrap_or_default();
+
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    Err(github_api_error(status, scopes.as_deref(), &text))
+}
+
 #[tauri::command]
 fn remove_project(project_id: String) -> Result<(), String> {
     let was_active = read_active_id()?.as_deref() == Some(project_id.as_str());
@@ -3334,6 +3673,9 @@ pub fn run() {
             board_create,
             board_invite_link,
             board_parse_invite,
+            board_invite_collaborator,
+            github_pending_invitations,
+            github_accept_invitation,
             remove_project,
             switch_project,
             // Graph (Fase 6F)
@@ -5014,5 +5356,179 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             let link = format!("gitteam://join?repo={}", bad);
             assert!(parse_invite_link(&link).is_err(), "accepted {:?}", bad);
         }
+    }
+
+    // ----- T5: el dueño otorga el acceso por @usuario -----
+
+    #[test]
+    fn a_github_username_is_normalized_the_way_github_writes_it() {
+        assert_eq!(
+            normalize_github_username("  @Ana-Dev  ").unwrap(),
+            "Ana-Dev"
+        );
+        assert_eq!(normalize_github_username("ana").unwrap(), "ana");
+
+        for bad in [
+            "",
+            "   ",
+            "@",
+            "ana dev",
+            "-ana",
+            "ana-",
+            "ana--dev",
+            "ana/dev",
+            "ana#dev",
+            "ana_dev",
+        ] {
+            let error = normalize_github_username(bad).expect_err("must be rejected");
+            assert!(!error.trim().is_empty(), "{:?} produced no reason", bad);
+        }
+
+        let too_long = "a".repeat(40);
+        assert!(normalize_github_username(&too_long).is_err());
+    }
+
+    #[test]
+    fn a_repository_is_named_by_its_owner_and_its_name() {
+        assert_eq!(
+            repo_full_name("https://github.com/astivens/royero-labs-board.git").as_deref(),
+            Some("astivens/royero-labs-board")
+        );
+        assert_eq!(
+            repo_full_name("git@github.com:astivens/board.git").as_deref(),
+            Some("astivens/board")
+        );
+        assert_eq!(
+            repo_full_name("https://ghp_secret@github.com/astivens/board").as_deref(),
+            Some("astivens/board")
+        );
+
+        // Otorgar acceso por usuario es una operación de GitHub: en otro host no
+        // hay nada que preguntar, y decirlo acá es mejor que fallar más tarde.
+        assert_eq!(repo_full_name("https://gitlab.com/astivens/board.git"), None);
+        assert_eq!(repo_full_name("https://github.com/astivens"), None);
+        assert_eq!(repo_full_name("/home/anuar/boards/mine"), None);
+    }
+
+    #[test]
+    fn the_collaborator_call_asks_for_write_access() {
+        // Como el cuerpo de la creación del board: lo que el cambio promete
+        // vive en un test, no sólo en un literal dentro de la llamada.
+        assert_eq!(
+            collaborator_invite_body(),
+            serde_json::json!({ "permission": "push" })
+        );
+    }
+
+    #[test]
+    fn a_new_invitation_and_an_existing_collaborator_read_differently() {
+        let invited = collaborator_result_message(201, "Ana-Dev");
+        assert!(invited.contains("Ana-Dev"), "{}", invited);
+        assert!(invited.to_lowercase().contains("accept"), "{}", invited);
+
+        let already = collaborator_result_message(204, "Ana-Dev");
+        assert!(already.contains("Ana-Dev"), "{}", already);
+        assert_ne!(invited, already);
+    }
+
+    #[test]
+    fn a_username_github_does_not_know_says_so() {
+        let message = collaborator_error_message(404, None, "{}", "ana");
+        assert!(message.contains("ana"), "{}", message);
+
+        // El mapeo general explica un 403 hablando de **crear un repositorio**,
+        // que no es lo que hace esta llamada: el alta de acceso tiene su propio
+        // motivo para ser rechazada y lo dice.
+        let forbidden = collaborator_error_message(403, None, r#"{"message":"Forbidden"}"#, "ana");
+        assert!(forbidden.contains("ana"), "{}", forbidden);
+        assert!(forbidden.contains("access"), "{}", forbidden);
+        assert!(
+            !forbidden.contains("creating a repository"),
+            "{}",
+            forbidden
+        );
+
+        // Lo que no tiene un caso propio sigue usando el mapeo general, que lee
+        // el cuerpo.
+        let validation =
+            collaborator_error_message(422, None, r#"{"message":"Validation Failed"}"#, "ana");
+        assert!(validation.contains("Validation Failed"), "{}", validation);
+    }
+
+    // ----- T5: el invitado acepta la invitación que GitHub dejó pendiente -----
+
+    const PENDING_INVITATIONS: &str = r#"[
+      {
+        "id": 424242,
+        "repository": { "full_name": "astivens/royero-labs-board", "private": true },
+        "inviter": { "login": "astivens" },
+        "permissions": "write",
+        "expired": false
+      },
+      {
+        "id": 7,
+        "repository": { "full_name": "otra/board" },
+        "inviter": null,
+        "permissions": "read"
+      }
+    ]"#;
+
+    #[test]
+    fn pending_invitations_are_read_from_what_github_sends() {
+        let invites = pending_invitations_from_json(PENDING_INVITATIONS).expect("must parse");
+        assert_eq!(invites.len(), 2);
+        assert_eq!(invites[0].id, 424242);
+        assert_eq!(invites[0].repo, "astivens/royero-labs-board");
+        assert_eq!(invites[0].from.as_deref(), Some("astivens"));
+        assert_eq!(invites[1].from, None);
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_list_of_invitations_is_handled() {
+        assert!(pending_invitations_from_json("[]")
+            .expect("an empty list is not a failure")
+            .is_empty());
+        assert!(pending_invitations_from_json("not json").is_err());
+        // Un elemento sin repositorio no se puede convertir en una invitación útil.
+        assert!(pending_invitations_from_json(r#"[{"id":1}]"#).is_err());
+    }
+
+    #[test]
+    fn the_invitation_offered_is_the_one_for_this_board() {
+        let invites = pending_invitations_from_json(PENDING_INVITATIONS).expect("must parse");
+        // GitHub no distingue mayúsculas en los nombres.
+        let found =
+            invitation_for_repo(&invites, "Astivens/Royero-Labs-Board").expect("must match");
+        assert_eq!(found.id, 424242);
+        assert_eq!(invitation_for_repo(&invites, "astivens/otra-cosa"), None);
+    }
+
+    #[test]
+    fn every_github_call_carries_the_same_headers() {
+        // Los headers se movieron a un solo lugar para que las tres llamadas de
+        // T5 no repitan cuatro líneas cada una; esto fija que siguen siendo los
+        // mismos que usaba la creación del board.
+        let headers = github_headers("ghp_secret");
+        let names: Vec<&str> = headers.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Authorization",
+                "Accept",
+                "X-GitHub-Api-Version",
+                "User-Agent"
+            ]
+        );
+        assert_eq!(headers[0].1, "Bearer ghp_secret");
+        assert_eq!(headers[3].1, "gitteam");
+
+        // La credencial viaja en un header y en ninguno más.
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(_, value)| value.contains("ghp_secret"))
+                .count(),
+            1
+        );
     }
 }
