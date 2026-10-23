@@ -4004,6 +4004,53 @@ mod tests {
     }
 
     #[test]
+    fn identity_args_pins_only_the_halves_it_knows() {
+        assert!(identity_args(" \t", "\n").is_empty());
+        assert_eq!(
+            identity_args("", "e@example.com"),
+            vec!["-c".to_string(), "user.email=e@example.com".to_string()]
+        );
+        assert_eq!(
+            identity_args("  Name  ", "\te@example.com\n"),
+            vec![
+                "-c".to_string(),
+                "user.name=Name".to_string(),
+                "-c".to_string(),
+                "user.email=e@example.com".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_blank_identity_only_removes_blank_values() {
+        let dir = temp_path("clear-blank-identity");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init", "-q"]);
+        git_in(&dir, &["config", "--local", "user.name", "Real Name"]);
+        git_in(&dir, &["config", "--local", "user.email", "real@example.com"]);
+
+        clear_blank_identity(&dir).await;
+        assert_eq!(
+            git_out(&dir, &["config", "--local", "--get", "user.name"]).stdout,
+            b"Real Name\n"
+        );
+        assert_eq!(
+            git_out(&dir, &["config", "--local", "--get", "user.email"]).stdout,
+            b"real@example.com\n"
+        );
+
+        git_in(&dir, &["config", "--local", "user.name", ""]);
+        git_in(&dir, &["config", "--local", "user.email", "   "]);
+        clear_blank_identity(&dir).await;
+        assert!(!git_out(&dir, &["config", "--local", "--get", "user.name"]).status.success());
+        assert!(!git_out(&dir, &["config", "--local", "--get", "user.email"]).status.success());
+        // Absent keys must not panic either.
+        clear_blank_identity(&dir).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn frontmatter_round_trip_preserves_links() {
         let path = temp_path("links.md");
         let original = sample_ticket(vec!["TKT-1039".to_string(), "TKT-1000".to_string()]);
