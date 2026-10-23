@@ -624,11 +624,33 @@ fn build_git_cmd(dir: &Path) -> Command {
     cmd
 }
 
+/// The `-c` arguments that pin the commit identity.
+///
+/// A blank value is not an identity: passing `-c user.name=` makes git abort with
+/// "empty ident name" and, worse, hides the perfectly good identity configured in
+/// the repository or in the user's global config. Blank fields are therefore
+/// omitted, so git resolves the author the way every other git command does.
+fn identity_args(user_name: &str, user_email: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let name = user_name.trim();
+    let email = user_email.trim();
+    if !name.is_empty() {
+        args.push("-c".to_string());
+        args.push(format!("user.name={}", name));
+    }
+    if !email.is_empty() {
+        args.push("-c".to_string());
+        args.push(format!("user.email={}", email));
+    }
+    args
+}
+
 fn build_git_cmd_with_user(dir: &Path, user_name: &str, user_email: &str) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);
-    cmd.arg("-c").arg(format!("user.name={}", user_name));
-    cmd.arg("-c").arg(format!("user.email={}", user_email));
+    for arg in identity_args(user_name, user_email) {
+        cmd.arg(arg);
+    }
     cmd
 }
 
@@ -1444,20 +1466,19 @@ async fn git_save_config(config: GitConfig, pat: String) -> Result<(), String> {
     write_git_config(&config)?;
     let dir = repo_root()?;
     if dir.join(".git").exists() {
-        let _ = run_git(
-            &dir,
-            &["config", "user.name", &config.git_user_name],
-            10,
-            None,
-        )
-        .await;
-        let _ = run_git(
-            &dir,
-            &["config", "user.email", &config.git_user_email],
-            10,
-            None,
-        )
-        .await;
+        for (key, value) in [
+            ("user.name", config.git_user_name.as_str()),
+            ("user.email", config.git_user_email.as_str()),
+        ] {
+            let value = value.trim();
+            if value.is_empty() {
+                // Never store a blank identity: it would override the user's real
+                // one and break every later commit with "empty ident name".
+                let _ = run_git(&dir, &["config", "--local", "--unset", key], 10, None).await;
+            } else {
+                let _ = run_git(&dir, &["config", "--local", key, value], 10, None).await;
+            }
+        }
     }
     Ok(())
 }
@@ -2306,6 +2327,20 @@ async fn missing_tracked_files(dir: &Path) -> Result<Vec<String>, String> {
     Ok(deleted_in_worktree_from_porcelain(&output))
 }
 
+/// Removes a blank `user.name` / `user.email` left in the checkout by an older
+/// build. A stored blank overrides the real identity and makes every commit fail
+/// with "empty ident name"; dropping it lets git resolve the author normally.
+async fn clear_blank_identity(dir: &Path) {
+    for key in ["user.name", "user.email"] {
+        let current = run_git(dir, &["config", "--local", "--get", key], 10, None).await;
+        if let Ok(value) = current {
+            if value.trim().is_empty() {
+                let _ = run_git(dir, &["config", "--local", "--unset", key], 10, None).await;
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn git_commit_ticket(
     filename: String,
@@ -2353,6 +2388,10 @@ async fn git_commit_ticket(
 
     let id = extract_ticket_id(&filename);
     let commit_msg = format!("ticket: {} {}", id, action);
+
+    // A blank identity stored by an older build hides the real one and aborts
+    // every commit; clear it before asking git to commit.
+    clear_blank_identity(&dir).await;
 
     let commit = run_git(
         &dir,
@@ -3882,6 +3921,32 @@ mod tests {
             filename: "TKT-1041-graph-links.md".to_string(),
             filepath: String::new(),
         }
+    }
+
+    /// A blank identity must never reach git: `-c user.name=` overrides the real
+    /// identity configured in the repository or globally and makes `git commit`
+    /// abort with "empty ident name".
+    #[test]
+    fn a_blank_identity_is_not_passed_to_git() {
+        assert!(identity_args("", "").is_empty());
+        assert!(identity_args("   ", "\t").is_empty());
+    }
+
+    #[test]
+    fn a_known_identity_is_pinned_for_the_commit() {
+        assert_eq!(
+            identity_args("Astivens", "anuar@example.com"),
+            vec![
+                "-c".to_string(),
+                "user.name=Astivens".to_string(),
+                "-c".to_string(),
+                "user.email=anuar@example.com".to_string(),
+            ]
+        );
+        assert_eq!(
+            identity_args("Astivens", ""),
+            vec!["-c".to_string(), "user.name=Astivens".to_string()]
+        );
     }
 
     #[test]
