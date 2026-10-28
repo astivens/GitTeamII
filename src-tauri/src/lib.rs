@@ -489,17 +489,21 @@ fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
     ]
 }
 
-/// The override for the active project. Best effort on purpose: with no
-/// connected project, no saved PAT, or a non-HTTP remote there is nothing to
-/// inject, and a command that needs no credential must not fail because of it.
-fn active_remote_override() -> Vec<String> {
-    let Ok(Some(config)) = read_git_config() else {
-        return Vec::new();
+/// The override for the active project.
+///
+/// An empty list is a legitimate answer only when there is nothing to inject: no
+/// connected project, or a remote that carries no credential (a local path, SSH).
+/// A project that does need one and has no readable PAT is an error, not an
+/// empty list: falling through to an anonymous fetch is what turned a missing
+/// keyring entry into a 300-second hang instead of a sentence the user could act
+/// on.
+fn active_remote_override() -> Result<Vec<String>, String> {
+    let config = match read_git_config()? {
+        Some(config) => config,
+        None => return Ok(Vec::new()),
     };
-    let Ok(pat) = load_pat() else {
-        return Vec::new();
-    };
-    credentialed_remote_override(&config.repo_url, &pat)
+    let pat = load_pat()?;
+    Ok(credentialed_remote_override(&config.repo_url, &pat))
 }
 
 /// Whether a `git` invocation talks to the remote and therefore needs the
@@ -621,6 +625,7 @@ fn extract_repo_name(url: &str) -> String {
 fn build_git_cmd(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);
+    no_interactive_prompt(&mut cmd);
     cmd
 }
 
@@ -645,9 +650,23 @@ fn identity_args(user_name: &str, user_email: &str) -> Vec<String> {
     args
 }
 
+/// Keeps git from ever asking a human for a credential.
+///
+/// A git process the app starts has no terminal of its own, but git does not
+/// care: when it needs a credential it opens `/dev/tty` directly (`prompt.c`),
+/// ignoring the null stdin it was handed. Under `pnpm tauri dev` that device
+/// exists — it is the developer's terminal — so a missing or rejected
+/// credential turned one sync into a silent 300-second hang that looked like a
+/// network timeout. `GIT_TERMINAL_PROMPT=0` turns the same situation into an
+/// immediate error, and the empty `GIT_ASKPASS` stops an inherited askpass
+/// helper from opening a window nobody is watching.
+fn no_interactive_prompt(cmd: &mut Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_ASKPASS", "");
+}
+
 fn build_git_cmd_with_user(dir: &Path, user_name: &str, user_email: &str) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(dir);
+    let mut cmd = build_git_cmd(dir);
     for arg in identity_args(user_name, user_email) {
         cmd.arg(arg);
     }
@@ -667,7 +686,7 @@ async fn run_git(
     // The credential is injected per command and never stored: see
     // `credentialed_remote_override`.
     if needs_credential(args) {
-        for a in active_remote_override() {
+        for a in active_remote_override()? {
             cmd.arg(a);
         }
     }
@@ -2285,7 +2304,7 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     }
 
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
-    for a in active_remote_override() {
+    for a in active_remote_override()? {
         cmd.arg(a);
     }
     if upstream_check.is_err() {
@@ -2468,7 +2487,7 @@ async fn git_commit_ticket(
 
     let mut push_cmd =
         build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
-    for a in active_remote_override() {
+    for a in active_remote_override()? {
         push_cmd.arg(a);
     }
     if upstream_check.is_err() {
@@ -6331,5 +6350,40 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
                 .count(),
             1
         );
+    }
+
+    /// `git` opening `/dev/tty` is what turned a missing credential into a
+    /// hang: the prompt has to be impossible, not merely unlikely, so the flag
+    /// travels with the command instead of depending on the caller's
+    /// environment.
+    #[test]
+    fn every_git_command_forbids_an_interactive_prompt() {
+        fn env_of(cmd: &Command) -> Vec<(String, Option<String>)> {
+            cmd.as_std().get_envs()
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect()
+        }
+
+        let plain = env_of(&build_git_cmd(Path::new(".")));
+        let with_user =
+            env_of(&build_git_cmd_with_user(Path::new("."), "A Name", "a@example.com"));
+
+        for env in [plain, with_user] {
+            assert!(
+                env.contains(&("GIT_TERMINAL_PROMPT".to_string(), Some("0".to_string()))),
+                "git could still open /dev/tty: {:?}",
+                env
+            );
+            assert!(
+                env.contains(&("GIT_ASKPASS".to_string(), Some(String::new()))),
+                "an askpass helper could still answer for the user: {:?}",
+                env
+            );
+        }
     }
 }
