@@ -84,7 +84,15 @@ function fakeBackend(scene: FakeScene) {
   const clipboard: string[] = [];
   const unknownCommands: string[] = [];
   const callbacks = new Map<number, (payload?: unknown) => void>();
+  // The listeners the app registered, by event id: the real API hands the id
+  // back from `plugin:event|listen` and unregisters it through
+  // `__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener`.
+  const listeners = new Map<
+    number,
+    { event: string; handler: number }
+  >();
   let nextCallbackId = 1;
+  let nextEventId = 1;
   let nextTicketNumber =
     state.tickets.reduce((max, t) => {
       const n = Number.parseInt(t.id.replace(/^TKT-/, ""), 10);
@@ -262,10 +270,22 @@ function fakeBackend(scene: FakeScene) {
       case "git_abort_resolution":
         state.conflicts = [];
         return null;
-      case "plugin:event|listen":
-        return args.handler ?? nextCallbackId++;
-      case "plugin:event|unlisten":
+      case "plugin:event|listen": {
+        // The real API expects an event id back and unregisters through
+        // `__TAURI_EVENT_PLUGIN_INTERNALS__`, so the fake keeps its own
+        // registry instead of only answering the invoke.
+        const eventId = nextEventId++;
+        listeners.set(eventId, {
+          event: String(args.event ?? ""),
+          handler: Number(args.handler ?? 0),
+        });
+        return eventId;
+      }
+      case "plugin:event|unlisten": {
+        const eventId = Number(args.eventId ?? 0);
+        listeners.delete(eventId);
         return null;
+      }
       case "plugin:event|emit":
         return null;
       case "plugin:deep-link|get_current":
@@ -289,9 +309,21 @@ function fakeBackend(scene: FakeScene) {
     },
     /** Emits a backend event to the listeners the app registered. */
     emit: (event: string, payload?: unknown) => {
-      for (const cb of callbacks.values()) cb({ event, id: 0, payload });
+      for (const listener of listeners.values()) {
+        if (listener.event !== event) continue;
+        const cb = callbacks.get(listener.handler);
+        if (cb) cb({ event, id: listener.handler, payload });
+      }
     },
     callbacks,
+  };
+
+  // The real event plugin's unregister hook. Without it, tearing a listener
+  // down throws inside the app instead of quietly unsubscribing.
+  (window as any).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+    unregisterListener: (_event: string, eventId: number) => {
+      listeners.delete(eventId);
+    },
   };
 
   (window as any).__TAURI_INTERNALS__ = {
