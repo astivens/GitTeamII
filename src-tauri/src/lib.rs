@@ -497,39 +497,77 @@ fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
     ]
 }
 
-/// The override for the active project.
-///
-/// An empty list is a legitimate answer when there is nothing to inject: no
-/// connected project, or a remote that carries no credential at all. A project
-/// that does need one and has no readable PAT is an error, not an empty list:
-/// falling through to an anonymous fetch is what turned a missing keyring entry
-/// into a 300-second hang instead of a sentence the user could act on.
-fn active_remote_override() -> Result<Vec<String>, String> {
-    let config = match read_git_config()? {
-        Some(config) => config,
-        None => return Ok(Vec::new()),
-    };
-    override_for_remote(&config.repo_url, load_pat)
+/// What the credential path decided for one command.
+enum RemoteCredential {
+    /// Nothing to inject: no project, or a remote authenticating another way.
+    None,
+    /// The `-c` arguments that inject the stored PAT.
+    Inject(Vec<String>),
+    /// The remote can carry a credential and the keyring produced none: the
+    /// command runs anonymously, so a public repository still syncs and a private
+    /// one fails at once. The reason rides along so that failure is explained.
+    Missing(String),
 }
 
-/// The override for one remote, given a way to load the PAT.
-///
-/// Split out from the keyring and the config file because taking the loader as a
-/// value is what makes the contract testable: a test can prove that a
-/// credential-free remote never reaches the keyring, and that a remote which
-/// needs a credential reports the keyring's own message instead of degrading to
-/// an anonymous fetch.
-fn override_for_remote(
+fn active_remote_credential() -> Result<RemoteCredential, String> {
+    let config = match read_git_config()? {
+        Some(config) => config,
+        None => return Ok(RemoteCredential::None),
+    };
+    Ok(credential_for_remote(&config.repo_url, load_pat))
+}
+
+/// The decision for one remote, given a way to load the PAT. Taking the loader
+/// as a value is what makes the contract testable.
+fn credential_for_remote(
     config_url: &str,
     load_pat: impl FnOnce() -> Result<String, String>,
-) -> Result<Vec<String>, String> {
+) -> RemoteCredential {
     // Classified before the keyring is touched: an SSH or local remote never
     // needed a PAT, and requiring one would break a project that synced fine.
     if !remote_carries_credential(config_url) {
-        return Ok(Vec::new());
+        return RemoteCredential::None;
     }
-    let pat = load_pat()?;
-    Ok(credentialed_remote_override(config_url, &pat))
+    match load_pat() {
+        Ok(pat) => RemoteCredential::Inject(credentialed_remote_override(config_url, &pat)),
+        Err(reason) => RemoteCredential::Missing(reason),
+    }
+}
+
+/// Puts the decision on a command, answering with the missing-credential reason.
+fn apply_credential(cmd: &mut Command, credential: RemoteCredential) -> Option<String> {
+    match credential {
+        RemoteCredential::None => None,
+        RemoteCredential::Inject(args) => {
+            for a in args {
+                cmd.arg(a);
+            }
+            None
+        }
+        RemoteCredential::Missing(reason) => Some(reason),
+    }
+}
+
+/// Does this failure read as the remote asking for a credential we lacked?
+fn looks_like_a_credential_failure(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    [
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "invalid username or token",
+        "terminal prompts disabled",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// The explanation for a failure that is about the credential, or `None`.
+fn explain_credential_failure(stderr: &str, missing: Option<&str>) -> Option<String> {
+    match missing {
+        Some(reason) if looks_like_a_credential_failure(stderr) => Some(reason.to_string()),
+        _ => None,
+    }
 }
 
 /// Whether a `git` invocation talks to the remote and therefore needs the
@@ -798,11 +836,11 @@ async fn run_git(
     };
     // The credential is injected per command and never stored: see
     // `credentialed_remote_override`.
-    if needs_credential(args) {
-        for a in active_remote_override()? {
-            cmd.arg(a);
-        }
-    }
+    let missing_credential = if needs_credential(args) {
+        apply_credential(&mut cmd, active_remote_credential()?)
+    } else {
+        None
+    };
     for a in args {
         cmd.arg(a);
     }
@@ -821,11 +859,13 @@ async fn run_git(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
+        let stderr = redact_credentials(stderr.trim());
+        if let Some(reason) = explain_credential_failure(&stderr, missing_credential.as_deref()) {
+            return Err(reason);
+        }
         return Err(format!(
             "git {} failed (exit {}): {}",
-            invoked,
-            output.status,
-            redact_credentials(stderr.trim())
+            invoked, output.status, stderr
         ));
     }
     Ok(stdout)
@@ -833,7 +873,7 @@ async fn run_git(
 
 /// Runs one network command with the credential of a project that is not active
 /// yet. During setup the keyring entry and `config.json` are written *after* the
-/// clone, so `active_remote_override` cannot resolve them: there the override
+/// clone, so `active_remote_credential` cannot resolve them: there the override
 /// has to come from the values already in hand.
 async fn run_git_with_credential(
     dir: &Path,
@@ -2419,9 +2459,7 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     }
 
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
-    for a in active_remote_override()? {
-        cmd.arg(a);
-    }
+    let missing_credential = apply_credential(&mut cmd, active_remote_credential()?);
     if upstream_check.is_err() {
         cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
@@ -2435,6 +2473,9 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
         let lower = stderr.to_lowercase();
         if lower.contains("non-fast-forward") || lower.contains("rejected") {
             return Err(format!("REJECTED: {}", stderr));
+        }
+        if let Some(reason) = explain_credential_failure(&stderr, missing_credential.as_deref()) {
+            return Err(reason);
         }
         return Err(format!("git push failed: {}", stderr));
     }
@@ -2599,9 +2640,7 @@ async fn git_commit_ticket(
 
     let mut push_cmd =
         build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
-    for a in active_remote_override()? {
-        push_cmd.arg(a);
-    }
+    let missing_credential = apply_credential(&mut push_cmd, active_remote_credential()?);
     if upstream_check.is_err() {
         push_cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
@@ -2616,6 +2655,9 @@ async fn git_commit_ticket(
         let lower = stderr.to_lowercase();
         if lower.contains("non-fast-forward") || lower.contains("rejected") {
             return Err(format!("REJECTED: {}", stderr));
+        }
+        if let Some(reason) = explain_credential_failure(&stderr, missing_credential.as_deref()) {
+            return Err(reason);
         }
         return Err(format!("git push failed: {}", stderr));
     }
@@ -6557,54 +6599,69 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         }
     }
 
-    /// The override contract, made testable by taking the loader as a value: a
-    /// remote that carries no credential must not even touch the keyring, and a
-    /// remote that needs one must report the keyring's own message instead of
-    /// falling back to an anonymous fetch.
+    /// Three answers: no-credential remotes never touch the keyring, an HTTPS
+    /// remote with no PAT may still try anonymously, and a failure it earns is
+    /// explained instead of printed raw.
     #[test]
-    fn a_remote_that_carries_no_credential_never_asks_for_the_pat() {
+    fn the_credential_decision_keeps_a_public_remote_working_anonymously() {
         let mut asked = false;
         for url in [
             "/srv/git/board.git",
             "../relative/repo",
             "git@github.com:owner/repo.git",
             "ssh://git@example.com/owner/repo.git",
-            "file:///srv/git/board.git",
         ] {
-            let args = override_for_remote(url, || {
+            let credential = credential_for_remote(url, || {
                 asked = true;
                 Err("no PAT configured".to_string())
-            })
-            .unwrap_or_else(|e| panic!("{} needs no credential, but got: {}", url, e));
-            assert!(args.is_empty(), "{} produced an override: {:?}", url, args);
+            });
+            assert!(
+                matches!(credential, RemoteCredential::None),
+                "{} carries no credential, so it must get no override",
+                url
+            );
         }
-        assert!(
-            !asked,
-            "a credential-free remote must not reach the keyring at all"
-        );
-
-        // An https remote with no stored PAT is an error, not an empty override:
-        // that silent empty answer is what turned the missing keyring entry into
-        // a 300-second hang.
-        let missing = override_for_remote("https://github.com/owner/repo.git", || {
+        assert!(!asked, "a credential-free remote must not reach the keyring");
+        let reason = match credential_for_remote("https://github.com/owner/repo.git", || {
             Err("No saved credentials. Please set up the repository again.".to_string())
-        });
+        }) {
+            RemoteCredential::Missing(reason) => reason,
+            _ => panic!("an HTTPS remote with no PAT must still be allowed to try"),
+        };
         assert_eq!(
-            missing.expect_err("a remote that needs a credential must not go anonymous"),
+            reason,
             "No saved credentials. Please set up the repository again."
         );
-
-        // And with a PAT it still produces the single `-c` that injects it.
-        let with_pat = override_for_remote("https://github.com/owner/repo.git", || {
+        let mut anonymous = build_git_cmd_anywhere();
+        assert_eq!(
+            apply_credential(&mut anonymous, RemoteCredential::Missing(reason.clone())),
+            Some(reason.clone()),
+            "the missing credential must be reported, not swallowed"
+        );
+        let mut injected = build_git_cmd_anywhere();
+        let with_pat = credential_for_remote("https://github.com/owner/repo.git", || {
             Ok("ghp_secret".to_string())
-        })
-        .expect("a stored PAT is enough");
-        assert_eq!(with_pat.len(), 2);
-        assert_eq!(with_pat[0], "-c");
-        assert!(
-            with_pat[1].contains("x-access-token:ghp_secret@"),
-            "the override does not carry the credential: {}",
-            with_pat[1]
+        });
+        assert_eq!(apply_credential(&mut injected, with_pat), None);
+        let args: Vec<String> = injected
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.len() == 2 && args[0] == "-c");
+        assert!(args[1].contains("x-access-token:ghp_secret@"));
+        // Only a credential failure is rewritten: a network timeout keeps git's
+        // own words.
+        assert_eq!(
+            explain_credential_failure("fatal: unable to access: timed out", Some(&reason)),
+            None
+        );
+        assert_eq!(
+            explain_credential_failure(
+                "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+                Some(&reason)
+            ),
+            Some(reason)
         );
     }
 
