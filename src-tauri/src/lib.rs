@@ -475,10 +475,18 @@ fn with_authenticated_url(url: &str, pat: &str) -> String {
 /// travels with any copy of the directory. The stored remote stays
 /// credential-free instead, and each network command rewrites it to its
 /// credentialed form for its own duration using git's own mechanism.
+/// Whether a remote url can carry a credential in its userinfo.
+///
+/// A local path or an SSH remote authenticates some other way: there is nothing
+/// to inject, and rewriting one would turn a working remote into a broken url.
+/// The same answer decides whether a PAT is required at all, which is why it is
+/// a function and not an inline test.
+fn remote_carries_credential(config_url: &str) -> bool {
+    config_url.starts_with("http://") || config_url.starts_with("https://")
+}
+
 fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
-    // A local path or any other non-HTTP remote carries no credential to
-    // inject, and rewriting one would turn a working path into a broken url.
-    if !(config_url.starts_with("http://") || config_url.starts_with("https://")) {
+    if !remote_carries_credential(config_url) {
         return Vec::new();
     }
     let auth_url = with_authenticated_url(config_url, pat);
@@ -489,17 +497,77 @@ fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
     ]
 }
 
-/// The override for the active project. Best effort on purpose: with no
-/// connected project, no saved PAT, or a non-HTTP remote there is nothing to
-/// inject, and a command that needs no credential must not fail because of it.
-fn active_remote_override() -> Vec<String> {
-    let Ok(Some(config)) = read_git_config() else {
-        return Vec::new();
+/// What the credential path decided for one command.
+enum RemoteCredential {
+    /// Nothing to inject: no project, or a remote authenticating another way.
+    None,
+    /// The `-c` arguments that inject the stored PAT.
+    Inject(Vec<String>),
+    /// The remote can carry a credential and the keyring produced none: the
+    /// command runs anonymously, so a public repository still syncs and a private
+    /// one fails at once. The reason rides along so that failure is explained.
+    Missing(String),
+}
+
+fn active_remote_credential() -> Result<RemoteCredential, String> {
+    let config = match read_git_config()? {
+        Some(config) => config,
+        None => return Ok(RemoteCredential::None),
     };
-    let Ok(pat) = load_pat() else {
-        return Vec::new();
-    };
-    credentialed_remote_override(&config.repo_url, &pat)
+    Ok(credential_for_remote(&config.repo_url, load_pat))
+}
+
+/// The decision for one remote, given a way to load the PAT. Taking the loader
+/// as a value is what makes the contract testable.
+fn credential_for_remote(
+    config_url: &str,
+    load_pat: impl FnOnce() -> Result<String, String>,
+) -> RemoteCredential {
+    // Classified before the keyring is touched: an SSH or local remote never
+    // needed a PAT, and requiring one would break a project that synced fine.
+    if !remote_carries_credential(config_url) {
+        return RemoteCredential::None;
+    }
+    match load_pat() {
+        Ok(pat) => RemoteCredential::Inject(credentialed_remote_override(config_url, &pat)),
+        Err(reason) => RemoteCredential::Missing(reason),
+    }
+}
+
+/// Puts the decision on a command, answering with the missing-credential reason.
+fn apply_credential(cmd: &mut Command, credential: RemoteCredential) -> Option<String> {
+    match credential {
+        RemoteCredential::None => None,
+        RemoteCredential::Inject(args) => {
+            for a in args {
+                cmd.arg(a);
+            }
+            None
+        }
+        RemoteCredential::Missing(reason) => Some(reason),
+    }
+}
+
+/// Does this failure read as the remote asking for a credential we lacked?
+fn looks_like_a_credential_failure(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    [
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "invalid username or token",
+        "terminal prompts disabled",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// The explanation for a failure that is about the credential, or `None`.
+fn explain_credential_failure(stderr: &str, missing: Option<&str>) -> Option<String> {
+    match missing {
+        Some(reason) if looks_like_a_credential_failure(stderr) => Some(reason.to_string()),
+        _ => None,
+    }
 }
 
 /// Whether a `git` invocation talks to the remote and therefore needs the
@@ -621,6 +689,7 @@ fn extract_repo_name(url: &str) -> String {
 fn build_git_cmd(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);
+    no_interactive_prompt(&mut cmd);
     cmd
 }
 
@@ -645,13 +714,114 @@ fn identity_args(user_name: &str, user_email: &str) -> Vec<String> {
     args
 }
 
-fn build_git_cmd_with_user(dir: &Path, user_name: &str, user_email: &str) -> Command {
+/// Keeps git from ever asking a human for a credential.
+///
+/// A git process the app starts has no terminal of its own, but git does not
+/// care: when it needs a credential it opens `/dev/tty` directly (`prompt.c`),
+/// ignoring the null stdin it was handed. Under `pnpm tauri dev` that device
+/// exists — it is the developer's terminal — so a missing or rejected
+/// credential turned one sync into a silent 300-second hang that looked like a
+/// network timeout. `GIT_TERMINAL_PROMPT=0` turns the same situation into an
+/// immediate error, and the empty `GIT_ASKPASS` stops an inherited askpass
+/// helper from opening a window nobody is watching.
+fn no_interactive_prompt(cmd: &mut Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_ASKPASS", "");
+}
+
+/// A `git` command for the calls that take a url instead of running inside the
+/// data repository. They still need the prompt disabled.
+fn build_git_cmd_anywhere() -> Command {
     let mut cmd = Command::new("git");
-    cmd.current_dir(dir);
+    no_interactive_prompt(&mut cmd);
+    cmd
+}
+
+fn build_git_cmd_with_user(dir: &Path, user_name: &str, user_email: &str) -> Command {
+    let mut cmd = build_git_cmd(dir);
     for arg in identity_args(user_name, user_email) {
         cmd.arg(arg);
     }
     cmd
+}
+
+/// How a git command ended, as far as its time budget is concerned.
+enum CommandOutcome {
+    /// The command finished. The inner result is the spawn or wait error, if any.
+    Finished(std::io::Result<std::process::Output>),
+    /// The budget expired and the process tree was killed.
+    TimedOut,
+}
+
+/// Runs `cmd` to completion, and kills everything it started if it runs out of
+/// time.
+///
+/// Two details are load-bearing. The child leads its own process group
+/// (`process_group(0)`) because `git fetch` starts `git remote-https`, which
+/// starts `git-remote-https`: killing only the direct child leaves both
+/// grandchildren alive, and they were measured surviving exactly that way. And
+/// the kill is explicit, because abandoning the future — what
+/// `timeout(.., cmd.output())` used to do — stops waiting without stopping git.
+async fn output_with_timeout(mut cmd: Command, timeout_secs: u64) -> CommandOutcome {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // The fallback for platforms that have no process groups.
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return CommandOutcome::Finished(Err(e)),
+    };
+    // Captured before `wait_with_output` takes ownership of the child: a
+    // timeout needs the pid to reach the group.
+    let pid = child.id();
+    match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+        Ok(result) => CommandOutcome::Finished(result),
+        Err(_) => {
+            kill_process_tree(pid);
+            CommandOutcome::TimedOut
+        }
+    }
+}
+
+/// Turns a command's outcome into its result, naming the real budget when it ran
+/// out of time.
+///
+/// The budget is an argument on purpose. The two push sites spelled this match
+/// out twice and had already drifted: one waited 300 seconds and reported 60, so
+/// the only diagnostic a timed-out push produced was false about how long the
+/// user had waited. A message that misreports the elapsed time sends whoever
+/// reads it looking in the wrong place.
+fn finished_or_timed_out(
+    outcome: CommandOutcome,
+    what: &str,
+    timeout_secs: u64,
+) -> Result<std::process::Output, String> {
+    match outcome {
+        CommandOutcome::Finished(Ok(output)) => Ok(output),
+        CommandOutcome::Finished(Err(e)) => Err(format!("{} failed to spawn: {}", what, e)),
+        CommandOutcome::TimedOut => Err(format!("{} timed out after {}s", what, timeout_secs)),
+    }
+}
+
+/// Kills a command together with every process it started.
+///
+/// `output_with_timeout` puts the child at the head of its own process group,
+/// so a negated pid addresses the remote helper git spawned as well.
+fn kill_process_tree(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        // Safety: `kill` reads no memory and is async-signal-safe. A negative
+        // pid means "the process group led by this pid".
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 async fn run_git(
@@ -666,11 +836,11 @@ async fn run_git(
     };
     // The credential is injected per command and never stored: see
     // `credentialed_remote_override`.
-    if needs_credential(args) {
-        for a in active_remote_override() {
-            cmd.arg(a);
-        }
-    }
+    let missing_credential = if needs_credential(args) {
+        apply_credential(&mut cmd, active_remote_credential()?)
+    } else {
+        None
+    };
     for a in args {
         cmd.arg(a);
     }
@@ -679,19 +849,23 @@ async fn run_git(
     // and both messages below use that rendering: a failed `fetch` during setup
     // must not print the token it was given.
     let invoked = redact_credentials(&args.join(" "));
-    let fut = cmd.output();
-    let output = timeout(Duration::from_secs(timeout_secs), fut)
-        .await
-        .map_err(|_| format!("git {} timed out after {}s", invoked, timeout_secs))?
-        .map_err(|e| format!("git spawn failed: {}", e))?;
+    let output = match output_with_timeout(cmd, timeout_secs).await {
+        CommandOutcome::Finished(Ok(output)) => output,
+        CommandOutcome::Finished(Err(e)) => return Err(format!("git spawn failed: {}", e)),
+        CommandOutcome::TimedOut => {
+            return Err(format!("git {} timed out after {}s", invoked, timeout_secs))
+        }
+    };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
+        let stderr = redact_credentials(stderr.trim());
+        if let Some(reason) = explain_credential_failure(&stderr, missing_credential.as_deref()) {
+            return Err(reason);
+        }
         return Err(format!(
             "git {} failed (exit {}): {}",
-            invoked,
-            output.status,
-            redact_credentials(stderr.trim())
+            invoked, output.status, stderr
         ));
     }
     Ok(stdout)
@@ -699,7 +873,7 @@ async fn run_git(
 
 /// Runs one network command with the credential of a project that is not active
 /// yet. During setup the keyring entry and `config.json` are written *after* the
-/// clone, so `active_remote_override` cannot resolve them: there the override
+/// clone, so `active_remote_credential` cannot resolve them: there the override
 /// has to come from the values already in hand.
 async fn run_git_with_credential(
     dir: &Path,
@@ -1555,24 +1729,24 @@ async fn git_load_pat() -> Result<String, String> {
 async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectionResult, String> {
     let auth_url = with_authenticated_url(url, pat);
     let repo_name = extract_repo_name(url);
-    let mut cmd = Command::new("git");
+    let mut cmd = build_git_cmd_anywhere();
     cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
-    let result = timeout(Duration::from_secs(15), cmd.output()).await;
+    let result = output_with_timeout(cmd, 15).await;
 
     match result {
-        Err(_) => Ok(TestConnectionResult {
+        CommandOutcome::TimedOut => Ok(TestConnectionResult {
             ok: false,
             head_sha: None,
             repo_name,
             error: Some("Connection timed out after 15s".to_string()),
         }),
-        Ok(Err(e)) => Ok(TestConnectionResult {
+        CommandOutcome::Finished(Err(e)) => Ok(TestConnectionResult {
             ok: false,
             head_sha: None,
             repo_name,
             error: Some(format!("Failed to run git: {}", e)),
         }),
-        Ok(Ok(output)) if !output.status.success() => {
+        CommandOutcome::Finished(Ok(output)) if !output.status.success() => {
             // Git anonymises the userinfo in its own messages, and the url handed
             // to `ls-remote` here is the credentialed one: what this command says
             // goes to the connect form, so it is redacted as well.
@@ -1591,7 +1765,7 @@ async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectio
                 error: Some(user_msg),
             })
         }
-        Ok(Ok(output)) => {
+        CommandOutcome::Finished(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let head_sha = stdout
                 .lines()
@@ -1670,7 +1844,7 @@ async fn setup_repo_inner(
     // without `.git` is adopted via `git init` + fetch below.
     if !dir.exists() || (dir_is_empty && !is_git_repo) {
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
-        let mut cmd = Command::new("git");
+        let mut cmd = build_git_cmd_anywhere();
         // Cloning through the credential override keeps the token out of the
         // clone's `.git/config`, where a credentialed url would be persisted.
         cmd.args(&credentialed_remote_override(&config.repo_url, &pat));
@@ -1680,19 +1854,19 @@ async fn setup_repo_inner(
         // old 60s cap killed the clone mid-checkout, which left a complete
         // object store next to a half-populated worktree — the state that
         // afterwards reads as "everything was deleted".
-        let output = match timeout(Duration::from_secs(900), cmd.output()).await {
-            Err(_) => {
+        let output = match output_with_timeout(cmd, 900).await {
+            CommandOutcome::TimedOut => {
                 let _ = fs::remove_dir_all(&dir);
                 return Err(
                     "git clone timed out after 900s. Check your connection and try again — the partial clone was removed."
                         .to_string(),
                 );
             }
-            Ok(Err(e)) => {
+            CommandOutcome::Finished(Err(e)) => {
                 let _ = fs::remove_dir_all(&dir);
                 return Err(format!("git clone failed to spawn: {}", e));
             }
-            Ok(Ok(output)) => output,
+            CommandOutcome::Finished(Ok(output)) => output,
         };
         if !output.status.success() {
             let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr))
@@ -2285,25 +2459,23 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     }
 
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
-    for a in active_remote_override() {
-        cmd.arg(a);
-    }
+    let missing_credential = apply_credential(&mut cmd, active_remote_credential()?);
     if upstream_check.is_err() {
         cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
         cmd.args(&["push", "origin", "HEAD"]);
     }
 
-    let output = timeout(Duration::from_secs(300), cmd.output())
-        .await
-        .map_err(|_| "git push timed out after 60s".to_string())?
-        .map_err(|e| format!("git push failed to spawn: {}", e))?;
+    let output = finished_or_timed_out(output_with_timeout(cmd, 300).await, "git push", 300)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let lower = stderr.to_lowercase();
         if lower.contains("non-fast-forward") || lower.contains("rejected") {
             return Err(format!("REJECTED: {}", stderr));
+        }
+        if let Some(reason) = explain_credential_failure(&stderr, missing_credential.as_deref()) {
+            return Err(reason);
         }
         return Err(format!("git push failed: {}", stderr));
     }
@@ -2468,25 +2640,24 @@ async fn git_commit_ticket(
 
     let mut push_cmd =
         build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
-    for a in active_remote_override() {
-        push_cmd.arg(a);
-    }
+    let missing_credential = apply_credential(&mut push_cmd, active_remote_credential()?);
     if upstream_check.is_err() {
         push_cmd.args(&["push", "-u", "origin", "HEAD"]);
     } else {
         push_cmd.args(&["push", "origin", "HEAD"]);
     }
 
-    let push_output = timeout(Duration::from_secs(60), push_cmd.output())
-        .await
-        .map_err(|_| "git push timed out after 60s".to_string())?
-        .map_err(|e| format!("git push failed to spawn: {}", e))?;
+    let push_output =
+        finished_or_timed_out(output_with_timeout(push_cmd, 60).await, "git push", 60)?;
 
     if !push_output.status.success() {
         let stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
         let lower = stderr.to_lowercase();
         if lower.contains("non-fast-forward") || lower.contains("rejected") {
             return Err(format!("REJECTED: {}", stderr));
+        }
+        if let Some(reason) = explain_credential_failure(&stderr, missing_credential.as_deref()) {
+            return Err(reason);
         }
         return Err(format!("git push failed: {}", stderr));
     }
@@ -2816,12 +2987,12 @@ async fn git_start_watcher(
             let auth_url = with_authenticated_url(&config.repo_url, &pat);
 
             // `git ls-remote <url> HEAD` with 10s timeout
-            let mut cmd = Command::new("git");
+            let mut cmd = build_git_cmd_anywhere();
             cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
-            let result = timeout(Duration::from_secs(10), cmd.output()).await;
+            let result = output_with_timeout(cmd, 10).await;
 
             let new_sha: Option<String> = match result {
-                Ok(Ok(output)) if output.status.success() => {
+                CommandOutcome::Finished(Ok(output)) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     stdout
                         .lines()
@@ -2829,7 +3000,7 @@ async fn git_start_watcher(
                         .and_then(|l| l.split_whitespace().next())
                         .map(|s| s.to_string())
                 }
-                Ok(Ok(output)) => {
+                CommandOutcome::Finished(Ok(output)) => {
                     let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr));
                     eprintln!(
                         "[gitteam watcher] ls-remote failed (exit {}): {}",
@@ -2838,11 +3009,11 @@ async fn git_start_watcher(
                     );
                     None
                 }
-                Ok(Err(e)) => {
+                CommandOutcome::Finished(Err(e)) => {
                     eprintln!("[gitteam watcher] ls-remote spawn failed: {}", e);
                     None
                 }
-                Err(_) => {
+                CommandOutcome::TimedOut => {
                     eprintln!("[gitteam watcher] ls-remote timed out after 10s");
                     None
                 }
@@ -6332,4 +6503,166 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             1
         );
     }
+
+    /// `git` opening `/dev/tty` is what turned a missing credential into a
+    /// hang: the prompt has to be impossible, not merely unlikely, so the flag
+    /// travels with the command instead of depending on the caller's
+    /// environment.
+    #[test]
+    fn every_git_command_forbids_an_interactive_prompt() {
+        fn env_of(cmd: &Command) -> Vec<(String, Option<String>)> {
+            cmd.as_std().get_envs()
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect()
+        }
+
+        let plain = env_of(&build_git_cmd(Path::new(".")));
+        let with_user =
+            env_of(&build_git_cmd_with_user(Path::new("."), "A Name", "a@example.com"));
+        // The constructor the three new call sites use: the connection test,
+        // the clone and the watcher all lost their direct `Command::new("git")`
+        // and would silently lose the guard with it.
+        let anywhere = env_of(&build_git_cmd_anywhere());
+
+        for env in [plain, with_user, anywhere] {
+            assert!(
+                env.contains(&("GIT_TERMINAL_PROMPT".to_string(), Some("0".to_string()))),
+                "git could still open /dev/tty: {:?}",
+                env
+            );
+            assert!(
+                env.contains(&("GIT_ASKPASS".to_string(), Some(String::new()))),
+                "an askpass helper could still answer for the user: {:?}",
+                env
+            );
+        }
+    }
+
+    /// A timed-out command used to be abandoned, not stopped: the child kept
+    /// running, and so did the process the child started. This pins the kill by
+    /// measuring the grandchild, which is the shape `git fetch` leaked.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_timed_out_command_leaves_nothing_running() {
+        let marker = temp_path("kill-tree");
+        let _ = std::fs::remove_file(&marker);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 30 & echo $! >> '{marker}'; wait",
+            marker = marker.display()
+        ));
+
+        // Three seconds, not one: the budget has to cover the spawn and the
+        // script's own write before the behaviour under test begins, or a loaded
+        // machine fails the test instead of the code.
+        let outcome = output_with_timeout(cmd, 3).await;
+        assert!(
+            matches!(outcome, CommandOutcome::TimedOut),
+            "the command should have run out of time"
+        );
+
+        let grandchild: i32 = std::fs::read_to_string(&marker)
+            .expect("the script records the pid it started")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert!(grandchild > 0);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_is_running(grandchild) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pid {} survived the timeout",
+                grandchild
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// A zombie has released everything it held, so for that test it is gone.
+    #[cfg(target_os = "linux")]
+    fn process_is_running(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+            Err(_) => false,
+            Ok(stat) => !stat
+                .rsplit(')')
+                .next()
+                .map(|rest| rest.trim_start().starts_with('Z'))
+                .unwrap_or(false),
+        }
+    }
+
+    /// Three answers: no-credential remotes never touch the keyring, an HTTPS
+    /// remote with no PAT may still try anonymously, and a failure it earns is
+    /// explained instead of printed raw.
+    #[test]
+    fn the_credential_decision_keeps_a_public_remote_working_anonymously() {
+        let mut asked = false;
+        for url in [
+            "/srv/git/board.git",
+            "../relative/repo",
+            "git@github.com:owner/repo.git",
+            "ssh://git@example.com/owner/repo.git",
+        ] {
+            let credential = credential_for_remote(url, || {
+                asked = true;
+                Err("no PAT configured".to_string())
+            });
+            assert!(
+                matches!(credential, RemoteCredential::None),
+                "{} carries no credential, so it must get no override",
+                url
+            );
+        }
+        assert!(!asked, "a credential-free remote must not reach the keyring");
+        let reason = match credential_for_remote("https://github.com/owner/repo.git", || {
+            Err("No saved credentials. Please set up the repository again.".to_string())
+        }) {
+            RemoteCredential::Missing(reason) => reason,
+            _ => panic!("an HTTPS remote with no PAT must still be allowed to try"),
+        };
+        assert_eq!(
+            reason,
+            "No saved credentials. Please set up the repository again."
+        );
+        let mut anonymous = build_git_cmd_anywhere();
+        assert_eq!(
+            apply_credential(&mut anonymous, RemoteCredential::Missing(reason.clone())),
+            Some(reason.clone()),
+            "the missing credential must be reported, not swallowed"
+        );
+        let mut injected = build_git_cmd_anywhere();
+        let with_pat = credential_for_remote("https://github.com/owner/repo.git", || {
+            Ok("ghp_secret".to_string())
+        });
+        assert_eq!(apply_credential(&mut injected, with_pat), None);
+        let args: Vec<String> = injected
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.len() == 2 && args[0] == "-c");
+        assert!(args[1].contains("x-access-token:ghp_secret@"));
+        // Only a credential failure is rewritten: a network timeout keeps git's
+        // own words.
+        assert_eq!(
+            explain_credential_failure("fatal: unable to access: timed out", Some(&reason)),
+            None
+        );
+        assert_eq!(
+            explain_credential_failure(
+                "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+                Some(&reason)
+            ),
+            Some(reason)
+        );
+    }
+
 }
