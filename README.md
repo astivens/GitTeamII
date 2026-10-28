@@ -213,6 +213,7 @@ Each target must be built on its own platform.
 ## Development
 
 On Linux, storing the token needs a running Secret Service — GNOME Keyring or KWallet — and building links against `libdbus` (`apt install libdbus-1-dev` when the headers are missing).
+
 ```bash
 pnpm tauri dev              # hot-reloading desktop app
 pnpm exec tsc --noEmit      # type check

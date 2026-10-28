@@ -91,6 +91,8 @@ sudo pacman -S --needed base-devel pkgconf cmake webkit2gtk-4.1 gtk3 \
 
 En macOS hacen falta las Command Line Tools de Xcode. En Windows, las herramientas de compilación de MSVC y WebView2 (viene preinstalado en Windows actuales).
 
+En Linux, guardar el token necesita un Secret Service en ejecución — GNOME Keyring o KWallet — y la compilación enlaza contra `libdbus` (`apt install libdbus-1-dev` cuando faltan las cabeceras).
+
 ## Puesta en marcha
 
 ```bash
@@ -193,7 +195,7 @@ El frontend nunca toca el sistema de archivos: toda lectura y escritura pasa por
 
 ## Modelo de seguridad
 
-- **Almacenamiento del token.** El token de acceso personal vive en el llavero del sistema (Secret Service en Linux, Keychain en macOS, Credential Manager en Windows) bajo `gitteam/<project-id>`. Nunca se escribe en un archivo, ni se registra, ni se envía al frontend.
+- **Almacenamiento del token.** El token de acceso personal vive en el llavero del sistema (Secret Service en Linux, Keychain en macOS, Credential Manager en Windows) bajo `gitteam/<project-id>`. Nunca se escribe en un archivo, ni se registra, ni se envía al frontend. En Linux el llavero usa el Secret Service (GNOME Keyring o KWallet) con keyutils como caché, así que la credencial sobrevive a un cierre de sesión: el almacenamiento en keyutils a secas es de alcance de sesión y su enlace persistente se revoca tras `persistent_keyring_expiry` (tres días por omisión), que es como un token guardado puede desaparecer sin avisar. El Secret Service guarda su propia base cifrada en disco — ese almacén, no GitTeam, es el dueño de la copia en reposo.
 - **Uso del token.** Se inyecta por comando de Git mediante una sobreescritura `url.<con-credencial>.insteadOf=<limpia>` acotada a ese comando. El remoto configurado queda limpio, así que la credencial no se guarda en el `.git/config` del checkout ni sobrevive al comando.
 - **Archivo de configuración.** `config.json` está junto al checkout, contiene solo la URL del remoto, la identidad de Git y la hora de la última sincronización, y nunca el token.
 - **Redacción.** La salida de Git se limpia antes de llegar a un mensaje, así que una credencial presente en un comando fallido no puede aparecer en pantalla.
