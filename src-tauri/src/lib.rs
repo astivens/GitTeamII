@@ -475,10 +475,18 @@ fn with_authenticated_url(url: &str, pat: &str) -> String {
 /// travels with any copy of the directory. The stored remote stays
 /// credential-free instead, and each network command rewrites it to its
 /// credentialed form for its own duration using git's own mechanism.
+/// Whether a remote url can carry a credential in its userinfo.
+///
+/// A local path or an SSH remote authenticates some other way: there is nothing
+/// to inject, and rewriting one would turn a working remote into a broken url.
+/// The same answer decides whether a PAT is required at all, which is why it is
+/// a function and not an inline test.
+fn remote_carries_credential(config_url: &str) -> bool {
+    config_url.starts_with("http://") || config_url.starts_with("https://")
+}
+
 fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
-    // A local path or any other non-HTTP remote carries no credential to
-    // inject, and rewriting one would turn a working path into a broken url.
-    if !(config_url.starts_with("http://") || config_url.starts_with("https://")) {
+    if !remote_carries_credential(config_url) {
         return Vec::new();
     }
     let auth_url = with_authenticated_url(config_url, pat);
@@ -491,19 +499,37 @@ fn credentialed_remote_override(config_url: &str, pat: &str) -> Vec<String> {
 
 /// The override for the active project.
 ///
-/// An empty list is a legitimate answer only when there is nothing to inject: no
-/// connected project, or a remote that carries no credential (a local path, SSH).
-/// A project that does need one and has no readable PAT is an error, not an
-/// empty list: falling through to an anonymous fetch is what turned a missing
-/// keyring entry into a 300-second hang instead of a sentence the user could act
-/// on.
+/// An empty list is a legitimate answer when there is nothing to inject: no
+/// connected project, or a remote that carries no credential at all. A project
+/// that does need one and has no readable PAT is an error, not an empty list:
+/// falling through to an anonymous fetch is what turned a missing keyring entry
+/// into a 300-second hang instead of a sentence the user could act on.
 fn active_remote_override() -> Result<Vec<String>, String> {
     let config = match read_git_config()? {
         Some(config) => config,
         None => return Ok(Vec::new()),
     };
+    override_for_remote(&config.repo_url, load_pat)
+}
+
+/// The override for one remote, given a way to load the PAT.
+///
+/// Split out from the keyring and the config file because taking the loader as a
+/// value is what makes the contract testable: a test can prove that a
+/// credential-free remote never reaches the keyring, and that a remote which
+/// needs a credential reports the keyring's own message instead of degrading to
+/// an anonymous fetch.
+fn override_for_remote(
+    config_url: &str,
+    load_pat: impl FnOnce() -> Result<String, String>,
+) -> Result<Vec<String>, String> {
+    // Classified before the keyring is touched: an SSH or local remote never
+    // needed a PAT, and requiring one would break a project that synced fine.
+    if !remote_carries_credential(config_url) {
+        return Ok(Vec::new());
+    }
     let pat = load_pat()?;
-    Ok(credentialed_remote_override(&config.repo_url, &pat))
+    Ok(credentialed_remote_override(config_url, &pat))
 }
 
 /// Whether a `git` invocation talks to the remote and therefore needs the
@@ -720,6 +746,26 @@ async fn output_with_timeout(mut cmd: Command, timeout_secs: u64) -> CommandOutc
             kill_process_tree(pid);
             CommandOutcome::TimedOut
         }
+    }
+}
+
+/// Turns a command's outcome into its result, naming the real budget when it ran
+/// out of time.
+///
+/// The budget is an argument on purpose. The two push sites spelled this match
+/// out twice and had already drifted: one waited 300 seconds and reported 60, so
+/// the only diagnostic a timed-out push produced was false about how long the
+/// user had waited. A message that misreports the elapsed time sends whoever
+/// reads it looking in the wrong place.
+fn finished_or_timed_out(
+    outcome: CommandOutcome,
+    what: &str,
+    timeout_secs: u64,
+) -> Result<std::process::Output, String> {
+    match outcome {
+        CommandOutcome::Finished(Ok(output)) => Ok(output),
+        CommandOutcome::Finished(Err(e)) => Err(format!("{} failed to spawn: {}", what, e)),
+        CommandOutcome::TimedOut => Err(format!("{} timed out after {}s", what, timeout_secs)),
     }
 }
 
@@ -2382,13 +2428,7 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
         cmd.args(&["push", "origin", "HEAD"]);
     }
 
-    let output = match output_with_timeout(cmd, 300).await {
-        CommandOutcome::Finished(Ok(output)) => output,
-        CommandOutcome::Finished(Err(e)) => {
-            return Err(format!("git push failed to spawn: {}", e))
-        }
-        CommandOutcome::TimedOut => return Err("git push timed out after 60s".to_string()),
-    };
+    let output = finished_or_timed_out(output_with_timeout(cmd, 300).await, "git push", 300)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2568,13 +2608,8 @@ async fn git_commit_ticket(
         push_cmd.args(&["push", "origin", "HEAD"]);
     }
 
-    let push_output = match output_with_timeout(push_cmd, 60).await {
-        CommandOutcome::Finished(Ok(output)) => output,
-        CommandOutcome::Finished(Err(e)) => {
-            return Err(format!("git push failed to spawn: {}", e))
-        }
-        CommandOutcome::TimedOut => return Err("git push timed out after 60s".to_string()),
-    };
+    let push_output =
+        finished_or_timed_out(output_with_timeout(push_cmd, 60).await, "git push", 60)?;
 
     if !push_output.status.success() {
         let stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
@@ -6447,8 +6482,12 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let plain = env_of(&build_git_cmd(Path::new(".")));
         let with_user =
             env_of(&build_git_cmd_with_user(Path::new("."), "A Name", "a@example.com"));
+        // The constructor the three new call sites use: the connection test,
+        // the clone and the watcher all lost their direct `Command::new("git")`
+        // and would silently lose the guard with it.
+        let anywhere = env_of(&build_git_cmd_anywhere());
 
-        for env in [plain, with_user] {
+        for env in [plain, with_user, anywhere] {
             assert!(
                 env.contains(&("GIT_TERMINAL_PROMPT".to_string(), Some("0".to_string()))),
                 "git could still open /dev/tty: {:?}",
@@ -6472,11 +6511,14 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let _ = std::fs::remove_file(&marker);
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
-            "sleep 30 & echo $! >> {marker}; wait",
+            "sleep 30 & echo $! >> '{marker}'; wait",
             marker = marker.display()
         ));
 
-        let outcome = output_with_timeout(cmd, 1).await;
+        // Three seconds, not one: the budget has to cover the spawn and the
+        // script's own write before the behaviour under test begins, or a loaded
+        // machine fails the test instead of the code.
+        let outcome = output_with_timeout(cmd, 3).await;
         assert!(
             matches!(outcome, CommandOutcome::TimedOut),
             "the command should have run out of time"
@@ -6514,4 +6556,56 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
                 .unwrap_or(false),
         }
     }
+
+    /// The override contract, made testable by taking the loader as a value: a
+    /// remote that carries no credential must not even touch the keyring, and a
+    /// remote that needs one must report the keyring's own message instead of
+    /// falling back to an anonymous fetch.
+    #[test]
+    fn a_remote_that_carries_no_credential_never_asks_for_the_pat() {
+        let mut asked = false;
+        for url in [
+            "/srv/git/board.git",
+            "../relative/repo",
+            "git@github.com:owner/repo.git",
+            "ssh://git@example.com/owner/repo.git",
+            "file:///srv/git/board.git",
+        ] {
+            let args = override_for_remote(url, || {
+                asked = true;
+                Err("no PAT configured".to_string())
+            })
+            .unwrap_or_else(|e| panic!("{} needs no credential, but got: {}", url, e));
+            assert!(args.is_empty(), "{} produced an override: {:?}", url, args);
+        }
+        assert!(
+            !asked,
+            "a credential-free remote must not reach the keyring at all"
+        );
+
+        // An https remote with no stored PAT is an error, not an empty override:
+        // that silent empty answer is what turned the missing keyring entry into
+        // a 300-second hang.
+        let missing = override_for_remote("https://github.com/owner/repo.git", || {
+            Err("No saved credentials. Please set up the repository again.".to_string())
+        });
+        assert_eq!(
+            missing.expect_err("a remote that needs a credential must not go anonymous"),
+            "No saved credentials. Please set up the repository again."
+        );
+
+        // And with a PAT it still produces the single `-c` that injects it.
+        let with_pat = override_for_remote("https://github.com/owner/repo.git", || {
+            Ok("ghp_secret".to_string())
+        })
+        .expect("a stored PAT is enough");
+        assert_eq!(with_pat.len(), 2);
+        assert_eq!(with_pat[0], "-c");
+        assert!(
+            with_pat[1].contains("x-access-token:ghp_secret@"),
+            "the override does not carry the credential: {}",
+            with_pat[1]
+        );
+    }
+
 }
