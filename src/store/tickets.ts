@@ -680,6 +680,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         } else {
           set({ syncStatus: "error", syncError: msg });
         }
+        // A failed sync is never silent: the banner keeps the text, this makes
+        // the failure impossible to miss while the user is looking elsewhere.
+        pushToast(msg, "error");
       }
     },
 
