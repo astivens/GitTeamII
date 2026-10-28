@@ -216,10 +216,11 @@ Each target must be built on its own platform.
 pnpm tauri dev              # hot-reloading desktop app
 pnpm exec tsc --noEmit      # type check
 pnpm build                  # type check + production frontend build
+pnpm test:e2e               # Playwright: UI flows against a faked Tauri IPC boundary
 cd src-tauri && cargo test  # 97 unit tests + 2 integration tests
 ```
 
-The Rust suite covers frontmatter round-tripping, link handling, graph edges, the merge driver and the credential handling. There is no frontend test runner yet; the frontend is verified with `tsc` and a production build.
+The Rust suite covers frontmatter round-tripping, link handling, graph edges, the merge driver and the credential handling. The E2E suite runs the real React app in headless Chromium; only the Tauri IPC boundary is faked (`e2e/fixtures/tauri-mock.ts`), so it covers the interface — boards, ticket CRUD, sync states — and not the Rust commands, which `cargo test` covers. Run `pnpm exec playwright install chromium` once per machine.
 
 ## Project structure
 
@@ -235,6 +236,7 @@ src-tauri/              Rust backend
   capabilities/         Tauri 2 permission scopes
   icons/                App icons, generated from the brand mark
 public/                 Static assets
+e2e/                    Playwright suite: UI flows against a faked Tauri IPC
 ```
 
 ## Not in scope
@@ -243,7 +245,7 @@ public/                 Static assets
 - Mobile clients.
 - Binary attachments.
 - Time tracking.
-- A frontend test runner.
+- A frontend test runner for component internals: the interface is covered by the Playwright E2E suite in `e2e/`, which fakes the Tauri IPC boundary, and the Rust backend has a `cargo test` suite.
 
 ## Acknowledgments
 

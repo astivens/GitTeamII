@@ -18,6 +18,7 @@ import { ToastHost } from "./components/ui/ToastHost";
 import { SetupScreen } from "./components/setup/SetupScreen";
 import { ConflictBanner } from "./components/conflicts/ConflictBanner";
 import { ConflictModal } from "./components/conflicts/ConflictModal";
+import { SyncErrorBanner } from "./components/layout/SyncErrorBanner";
 import { useTicketsStore } from "./store/tickets";
 import { useGlobalShortcuts } from "./lib/keyboard";
 import { pushToast } from "./lib/toast";
@@ -303,6 +304,8 @@ function App() {
       {syncStatus === "conflict" ? (
         <ConflictBanner onResolve={() => setConflictModalOpen(true)} />
       ) : null}
+
+      {syncStatus === "error" && initialized ? <SyncErrorBanner /> : null}
 
       <main className="flex-1 min-h-0 overflow-hidden">
         {!bootDone || (loading && !initialized) ? (

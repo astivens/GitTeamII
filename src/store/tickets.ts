@@ -47,6 +47,9 @@ function drainPending(): string[] {
 function projectToGitConfig(project: Project): GitConfig {
   return {
     repo_url: project.repo_url,
+    // The identity of a commit belongs to the repository: setup writes it into
+    // the checkout's git config. An empty value here means "let git decide",
+    // which is why these are never sent to git as blank flags.
     git_user_name: "",
     git_user_email: "",
     last_sync_at: project.last_sync_at,
@@ -677,6 +680,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => {
         } else {
           set({ syncStatus: "error", syncError: msg });
         }
+        // A failed sync is never silent: the banner keeps the text, this makes
+        // the failure impossible to miss while the user is looking elsewhere.
+        pushToast(msg, "error");
       }
     },
 

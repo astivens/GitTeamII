@@ -35,7 +35,11 @@ export function Column({ status, label, dotClass, tickets, onSelect }: ColumnPro
     setDragOver(false);
     const filename = e.dataTransfer.getData("text/x-ticket-filename");
     if (!filename) return;
-    const ticket = tickets.find((t) => t.filename === filename);
+    // The ticket being dragged comes from another column, so it is not in this
+    // column's own `tickets` prop: resolve it against the whole board instead.
+    const ticket = useTicketsStore
+      .getState()
+      .tickets.find((t) => t.filename === filename);
     if (!ticket) return;
     // Dropping on its own column is a silent no-op.
     if (ticket.status === status) return;
