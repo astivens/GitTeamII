@@ -665,12 +665,79 @@ fn no_interactive_prompt(cmd: &mut Command) {
     cmd.env("GIT_ASKPASS", "");
 }
 
+/// A `git` command for the calls that take a url instead of running inside the
+/// data repository. They still need the prompt disabled.
+fn build_git_cmd_anywhere() -> Command {
+    let mut cmd = Command::new("git");
+    no_interactive_prompt(&mut cmd);
+    cmd
+}
+
 fn build_git_cmd_with_user(dir: &Path, user_name: &str, user_email: &str) -> Command {
     let mut cmd = build_git_cmd(dir);
     for arg in identity_args(user_name, user_email) {
         cmd.arg(arg);
     }
     cmd
+}
+
+/// How a git command ended, as far as its time budget is concerned.
+enum CommandOutcome {
+    /// The command finished. The inner result is the spawn or wait error, if any.
+    Finished(std::io::Result<std::process::Output>),
+    /// The budget expired and the process tree was killed.
+    TimedOut,
+}
+
+/// Runs `cmd` to completion, and kills everything it started if it runs out of
+/// time.
+///
+/// Two details are load-bearing. The child leads its own process group
+/// (`process_group(0)`) because `git fetch` starts `git remote-https`, which
+/// starts `git-remote-https`: killing only the direct child leaves both
+/// grandchildren alive, and they were measured surviving exactly that way. And
+/// the kill is explicit, because abandoning the future — what
+/// `timeout(.., cmd.output())` used to do — stops waiting without stopping git.
+async fn output_with_timeout(mut cmd: Command, timeout_secs: u64) -> CommandOutcome {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // The fallback for platforms that have no process groups.
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return CommandOutcome::Finished(Err(e)),
+    };
+    // Captured before `wait_with_output` takes ownership of the child: a
+    // timeout needs the pid to reach the group.
+    let pid = child.id();
+    match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+        Ok(result) => CommandOutcome::Finished(result),
+        Err(_) => {
+            kill_process_tree(pid);
+            CommandOutcome::TimedOut
+        }
+    }
+}
+
+/// Kills a command together with every process it started.
+///
+/// `output_with_timeout` puts the child at the head of its own process group,
+/// so a negated pid addresses the remote helper git spawned as well.
+fn kill_process_tree(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        // Safety: `kill` reads no memory and is async-signal-safe. A negative
+        // pid means "the process group led by this pid".
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 async fn run_git(
@@ -698,11 +765,13 @@ async fn run_git(
     // and both messages below use that rendering: a failed `fetch` during setup
     // must not print the token it was given.
     let invoked = redact_credentials(&args.join(" "));
-    let fut = cmd.output();
-    let output = timeout(Duration::from_secs(timeout_secs), fut)
-        .await
-        .map_err(|_| format!("git {} timed out after {}s", invoked, timeout_secs))?
-        .map_err(|e| format!("git spawn failed: {}", e))?;
+    let output = match output_with_timeout(cmd, timeout_secs).await {
+        CommandOutcome::Finished(Ok(output)) => output,
+        CommandOutcome::Finished(Err(e)) => return Err(format!("git spawn failed: {}", e)),
+        CommandOutcome::TimedOut => {
+            return Err(format!("git {} timed out after {}s", invoked, timeout_secs))
+        }
+    };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
@@ -1574,24 +1643,24 @@ async fn git_load_pat() -> Result<String, String> {
 async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectionResult, String> {
     let auth_url = with_authenticated_url(url, pat);
     let repo_name = extract_repo_name(url);
-    let mut cmd = Command::new("git");
+    let mut cmd = build_git_cmd_anywhere();
     cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
-    let result = timeout(Duration::from_secs(15), cmd.output()).await;
+    let result = output_with_timeout(cmd, 15).await;
 
     match result {
-        Err(_) => Ok(TestConnectionResult {
+        CommandOutcome::TimedOut => Ok(TestConnectionResult {
             ok: false,
             head_sha: None,
             repo_name,
             error: Some("Connection timed out after 15s".to_string()),
         }),
-        Ok(Err(e)) => Ok(TestConnectionResult {
+        CommandOutcome::Finished(Err(e)) => Ok(TestConnectionResult {
             ok: false,
             head_sha: None,
             repo_name,
             error: Some(format!("Failed to run git: {}", e)),
         }),
-        Ok(Ok(output)) if !output.status.success() => {
+        CommandOutcome::Finished(Ok(output)) if !output.status.success() => {
             // Git anonymises the userinfo in its own messages, and the url handed
             // to `ls-remote` here is the credentialed one: what this command says
             // goes to the connect form, so it is redacted as well.
@@ -1610,7 +1679,7 @@ async fn git_test_connection_inner(url: &str, pat: &str) -> Result<TestConnectio
                 error: Some(user_msg),
             })
         }
-        Ok(Ok(output)) => {
+        CommandOutcome::Finished(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let head_sha = stdout
                 .lines()
@@ -1689,7 +1758,7 @@ async fn setup_repo_inner(
     // without `.git` is adopted via `git init` + fetch below.
     if !dir.exists() || (dir_is_empty && !is_git_repo) {
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all failed: {}", e))?;
-        let mut cmd = Command::new("git");
+        let mut cmd = build_git_cmd_anywhere();
         // Cloning through the credential override keeps the token out of the
         // clone's `.git/config`, where a credentialed url would be persisted.
         cmd.args(&credentialed_remote_override(&config.repo_url, &pat));
@@ -1699,19 +1768,19 @@ async fn setup_repo_inner(
         // old 60s cap killed the clone mid-checkout, which left a complete
         // object store next to a half-populated worktree — the state that
         // afterwards reads as "everything was deleted".
-        let output = match timeout(Duration::from_secs(900), cmd.output()).await {
-            Err(_) => {
+        let output = match output_with_timeout(cmd, 900).await {
+            CommandOutcome::TimedOut => {
                 let _ = fs::remove_dir_all(&dir);
                 return Err(
                     "git clone timed out after 900s. Check your connection and try again — the partial clone was removed."
                         .to_string(),
                 );
             }
-            Ok(Err(e)) => {
+            CommandOutcome::Finished(Err(e)) => {
                 let _ = fs::remove_dir_all(&dir);
                 return Err(format!("git clone failed to spawn: {}", e));
             }
-            Ok(Ok(output)) => output,
+            CommandOutcome::Finished(Ok(output)) => output,
         };
         if !output.status.success() {
             let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr))
@@ -2313,10 +2382,13 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
         cmd.args(&["push", "origin", "HEAD"]);
     }
 
-    let output = timeout(Duration::from_secs(300), cmd.output())
-        .await
-        .map_err(|_| "git push timed out after 60s".to_string())?
-        .map_err(|e| format!("git push failed to spawn: {}", e))?;
+    let output = match output_with_timeout(cmd, 300).await {
+        CommandOutcome::Finished(Ok(output)) => output,
+        CommandOutcome::Finished(Err(e)) => {
+            return Err(format!("git push failed to spawn: {}", e))
+        }
+        CommandOutcome::TimedOut => return Err("git push timed out after 60s".to_string()),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2496,10 +2568,13 @@ async fn git_commit_ticket(
         push_cmd.args(&["push", "origin", "HEAD"]);
     }
 
-    let push_output = timeout(Duration::from_secs(60), push_cmd.output())
-        .await
-        .map_err(|_| "git push timed out after 60s".to_string())?
-        .map_err(|e| format!("git push failed to spawn: {}", e))?;
+    let push_output = match output_with_timeout(push_cmd, 60).await {
+        CommandOutcome::Finished(Ok(output)) => output,
+        CommandOutcome::Finished(Err(e)) => {
+            return Err(format!("git push failed to spawn: {}", e))
+        }
+        CommandOutcome::TimedOut => return Err("git push timed out after 60s".to_string()),
+    };
 
     if !push_output.status.success() {
         let stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
@@ -2835,12 +2910,12 @@ async fn git_start_watcher(
             let auth_url = with_authenticated_url(&config.repo_url, &pat);
 
             // `git ls-remote <url> HEAD` with 10s timeout
-            let mut cmd = Command::new("git");
+            let mut cmd = build_git_cmd_anywhere();
             cmd.arg("ls-remote").arg(&auth_url).arg("HEAD");
-            let result = timeout(Duration::from_secs(10), cmd.output()).await;
+            let result = output_with_timeout(cmd, 10).await;
 
             let new_sha: Option<String> = match result {
-                Ok(Ok(output)) if output.status.success() => {
+                CommandOutcome::Finished(Ok(output)) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     stdout
                         .lines()
@@ -2848,7 +2923,7 @@ async fn git_start_watcher(
                         .and_then(|l| l.split_whitespace().next())
                         .map(|s| s.to_string())
                 }
-                Ok(Ok(output)) => {
+                CommandOutcome::Finished(Ok(output)) => {
                     let stderr = redact_credentials(&String::from_utf8_lossy(&output.stderr));
                     eprintln!(
                         "[gitteam watcher] ls-remote failed (exit {}): {}",
@@ -2857,11 +2932,11 @@ async fn git_start_watcher(
                     );
                     None
                 }
-                Ok(Err(e)) => {
+                CommandOutcome::Finished(Err(e)) => {
                     eprintln!("[gitteam watcher] ls-remote spawn failed: {}", e);
                     None
                 }
-                Err(_) => {
+                CommandOutcome::TimedOut => {
                     eprintln!("[gitteam watcher] ls-remote timed out after 10s");
                     None
                 }
@@ -6384,6 +6459,59 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
                 "an askpass helper could still answer for the user: {:?}",
                 env
             );
+        }
+    }
+
+    /// A timed-out command used to be abandoned, not stopped: the child kept
+    /// running, and so did the process the child started. This pins the kill by
+    /// measuring the grandchild, which is the shape `git fetch` leaked.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_timed_out_command_leaves_nothing_running() {
+        let marker = temp_path("kill-tree");
+        let _ = std::fs::remove_file(&marker);
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 30 & echo $! >> {marker}; wait",
+            marker = marker.display()
+        ));
+
+        let outcome = output_with_timeout(cmd, 1).await;
+        assert!(
+            matches!(outcome, CommandOutcome::TimedOut),
+            "the command should have run out of time"
+        );
+
+        let grandchild: i32 = std::fs::read_to_string(&marker)
+            .expect("the script records the pid it started")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert!(grandchild > 0);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_is_running(grandchild) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pid {} survived the timeout",
+                grandchild
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// A zombie has released everything it held, so for that test it is gone.
+    #[cfg(target_os = "linux")]
+    fn process_is_running(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+            Err(_) => false,
+            Ok(stat) => !stat
+                .rsplit(')')
+                .next()
+                .map(|rest| rest.trim_start().starts_with('Z'))
+                .unwrap_or(false),
         }
     }
 }

@@ -61,6 +61,12 @@ tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-t
 # (Linux already needs both for tauri).
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
+# Killing a git command that ran out of time is a Unix operation: the pid and
+# `kill(2)` come from here. Already in the dependency graph via tauri, so this
+# promotes it rather than downloading a crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
