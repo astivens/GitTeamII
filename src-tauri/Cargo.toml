@@ -50,7 +50,12 @@ dirs = "5"
 # Already in the dependency graph via tauri; promoted to a direct dependency
 # for OS entropy behind ticket ULIDs. No new crate is downloaded.
 getrandom = "0.3"
-keyring = { version = "3", features = ["linux-native", "apple-native", "windows-native"] }
+# `linux-native-sync-persistent` is not decoration: plain `linux-native` stores
+# in the session keyring, so a PAT died with the user session, and its persistent
+# link is revoked after `persistent_keyring_expiry` (3 days by default). The
+# combined store keeps keyutils as a cache and the Secret Service as the real
+# store, which is what makes the credential survive a logout or a week away.
+keyring = { version = "3", features = ["linux-native-sync-persistent", "apple-native", "windows-native"] }
 tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-thread", "time"] }
 # Already in the dependency graph via tauri, but with no TLS backend: the app
 # itself never spoke HTTPS, git does that. Creating a board has to call the

@@ -193,7 +193,7 @@ The frontend never touches the filesystem: every read and write goes through a R
 
 ## Security model
 
-- **Token storage.** The personal access token lives in the OS keyring (Linux Secret Service, macOS Keychain, Windows Credential Manager) under `gitteam/<project-id>`. It is never written to a file, logged, or sent to the frontend.
+- **Token storage.** The personal access token lives in the OS keyring (Linux Secret Service, macOS Keychain, Windows Credential Manager) under `gitteam/<project-id>`. It is never written to a file, logged, or sent to the frontend. On Linux the keyring is backed by the Secret Service (GNOME Keyring or KWallet) with keyutils as a cache, so the credential survives a logout: plain keyutils storage is session-scoped and its persistent link is revoked after `persistent_keyring_expiry` (three days by default), which is how a saved token can silently disappear. The Secret Service keeps its own encrypted database on disk — that store, not GitTeam, owns the at-rest copy.
 - **Token use.** It is injected per Git command through a command-scoped `url.<credentialed>.insteadOf=<clean>` override. The configured remote stays clean, so the credential is not stored in the checkout's `.git/config` and does not survive the command.
 - **Config file.** `config.json` sits next to the checkout, contains only the remote URL, the Git identity and the last sync time, and never the token.
 - **Redaction.** Git's output is scrubbed before it reaches a message, so a credential in a failing command cannot surface on screen.
@@ -212,6 +212,7 @@ Each target must be built on its own platform.
 
 ## Development
 
+On Linux, storing the token needs a running Secret Service — GNOME Keyring or KWallet — and building links against `libdbus` (`apt install libdbus-1-dev` when the headers are missing).
 ```bash
 pnpm tauri dev              # hot-reloading desktop app
 pnpm exec tsc --noEmit      # type check
