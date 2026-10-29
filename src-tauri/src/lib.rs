@@ -641,7 +641,7 @@ fn redact_credentials(text: &str) -> String {
         // The authority ends at the first delimiter, so `scheme://user@host/path`
         // is redacted even though the `@` sits before the slash.
         let end = after
-            .find(|c: char| matches!(c, '/' | '?' | '#' | ' ' | '\t' | '\n' | '\r' | '"' | '\''))
+            .find(['/', '?', '#', ' ', '\t', '\n', '\r', '"', '\''])
             .unwrap_or(after.len());
         let (authority, tail) = after.split_at(end);
         match (is_web, authority.rfind('@')) {
@@ -956,12 +956,11 @@ fn parse_existing_ids(dir: &Path) -> Vec<u64> {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Some(id) = extract_id_from_content(&content) {
-                if let Some(n) = id.strip_prefix("TKT-").and_then(|s| s.parse::<u64>().ok()) {
-                    ids.push(n);
-                }
-            }
+        if let Ok(content) = fs::read_to_string(&path)
+            && let Some(id) = extract_id_from_content(&content)
+            && let Some(n) = id.strip_prefix("TKT-").and_then(|s| s.parse::<u64>().ok())
+        {
+            ids.push(n);
         }
     }
     ids
@@ -1162,8 +1161,8 @@ fn encode_ulid(bytes: &[u8; 16]) -> String {
 /// entropy.
 fn ulid_bytes(ms: u64, random: [u8; 10]) -> [u8; 16] {
     let mut bytes = [0u8; 16];
-    for i in 0..6 {
-        bytes[i] = ((ms >> (8 * (5 - i))) & 0xff) as u8;
+    for (i, byte) in bytes.iter_mut().enumerate().take(6) {
+        *byte = ((ms >> (8 * (5 - i))) & 0xff) as u8;
     }
     bytes[6..].copy_from_slice(&random);
     bytes
@@ -1261,9 +1260,7 @@ fn claims_to_be_a_ticket(name: &str, content: &str) -> bool {
             return false;
         }
         if let Some(value) = trimmed.strip_prefix("id:") {
-            let value = value
-                .trim_start()
-                .trim_start_matches(|c| c == '"' || c == '\'');
+            let value = value.trim_start().trim_start_matches(['"', '\'']);
             return value.starts_with("TKT-");
         }
     }
@@ -1453,10 +1450,10 @@ fn find_ticket_path_by_id(dir: &Path, id: &str) -> Result<PathBuf, String> {
         if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if extract_id_from_content(&content).as_deref() == Some(id) {
-                return Ok(path);
-            }
+        if let Ok(content) = fs::read_to_string(&path)
+            && extract_id_from_content(&content).as_deref() == Some(id)
+        {
+            return Ok(path);
         }
     }
     Err(format!("ticket not found: {}", id))
@@ -1809,14 +1806,14 @@ async fn setup_repo_inner(
     // which carries no user identity — so it arrives with empty name/email.
     // Backfill from the config already saved for this project instead of
     // overwriting a good identity (and the saved config) with empty values.
-    if config.git_user_name.trim().is_empty() || config.git_user_email.trim().is_empty() {
-        if let Some(saved) = read_git_config()? {
-            if config.git_user_name.trim().is_empty() {
-                config.git_user_name = saved.git_user_name;
-            }
-            if config.git_user_email.trim().is_empty() {
-                config.git_user_email = saved.git_user_email;
-            }
+    if (config.git_user_name.trim().is_empty() || config.git_user_email.trim().is_empty())
+        && let Some(saved) = read_git_config()?
+    {
+        if config.git_user_name.trim().is_empty() {
+            config.git_user_name = saved.git_user_name;
+        }
+        if config.git_user_email.trim().is_empty() {
+            config.git_user_email = saved.git_user_email;
         }
     }
 
@@ -1847,7 +1844,7 @@ async fn setup_repo_inner(
         let mut cmd = build_git_cmd_anywhere();
         // Cloning through the credential override keeps the token out of the
         // clone's `.git/config`, where a credentialed url would be persisted.
-        cmd.args(&credentialed_remote_override(&config.repo_url, &pat));
+        cmd.args(credentialed_remote_override(&config.repo_url, &pat));
         cmd.arg("clone").arg(&clean_url).arg(&dir);
         // Cloning someone's real repository can legitimately take minutes: one
         // with a committed node_modules runs to tens of thousands of files. The
@@ -1904,7 +1901,7 @@ async fn setup_repo_inner(
 
         let mut cmd = Command::new("git");
         cmd.current_dir(&dir);
-        cmd.args(&["remote", "add", "origin", &clean_url]);
+        cmd.args(["remote", "add", "origin", &clean_url]);
         let status = timeout(Duration::from_secs(15), cmd.status())
             .await
             .map_err(|_| "git remote add timed out".to_string())?
@@ -2488,9 +2485,9 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
     let missing_credential = apply_credential(&mut cmd, active_remote_credential()?);
     if upstream_check.is_err() {
-        cmd.args(&["push", "-u", "origin", "HEAD"]);
+        cmd.args(["push", "-u", "origin", "HEAD"]);
     } else {
-        cmd.args(&["push", "origin", "HEAD"]);
+        cmd.args(["push", "origin", "HEAD"]);
     }
 
     let output = finished_or_timed_out(output_with_timeout(cmd, 300).await, "git push", 300)?;
@@ -2586,10 +2583,10 @@ async fn missing_tracked_files(dir: &Path) -> Result<Vec<String>, String> {
 async fn clear_blank_identity(dir: &Path) {
     for key in ["user.name", "user.email"] {
         let current = run_git(dir, &["config", "--local", "--get", key], 10, None).await;
-        if let Ok(value) = current {
-            if value.trim().is_empty() {
-                let _ = run_git(dir, &["config", "--local", "--unset", key], 10, None).await;
-            }
+        if let Ok(value) = current
+            && value.trim().is_empty()
+        {
+            let _ = run_git(dir, &["config", "--local", "--unset", key], 10, None).await;
         }
     }
 }
@@ -2625,7 +2622,7 @@ async fn git_commit_ticket(
     // Scope both the check and the commit to this ticket so unrelated staged
     // work stays exactly where it is instead of being swept into the commit.
     let mut diff_cmd = build_git_cmd(&dir);
-    diff_cmd.args(&["diff", "--cached", "--quiet", "--", &filename]);
+    diff_cmd.args(["diff", "--cached", "--quiet", "--", &filename]);
     let diff_status = timeout(Duration::from_secs(60), diff_cmd.status())
         .await
         .map_err(|_| "git diff --cached timed out".to_string())?
@@ -2668,9 +2665,9 @@ async fn git_commit_ticket(
     let mut push_cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
     let missing_credential = apply_credential(&mut push_cmd, active_remote_credential()?);
     if upstream_check.is_err() {
-        push_cmd.args(&["push", "-u", "origin", "HEAD"]);
+        push_cmd.args(["push", "-u", "origin", "HEAD"]);
     } else {
-        push_cmd.args(&["push", "origin", "HEAD"]);
+        push_cmd.args(["push", "origin", "HEAD"]);
     }
 
     let push_output =
