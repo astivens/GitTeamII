@@ -208,8 +208,7 @@ fn read_active_id() -> Result<Option<String>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("read active failed: {}", e))?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("read active failed: {}", e))?;
     let id = content.trim().to_string();
     if id.is_empty() {
         Ok(None)
@@ -246,8 +245,8 @@ fn pat_service(project_id: Option<&str>) -> String {
 }
 
 fn delete_pat_for_project(project_id: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(&pat_service(Some(project_id)), "github-pat")
-        .map_err(keyring_err)?;
+    let entry =
+        keyring::Entry::new(&pat_service(Some(project_id)), "github-pat").map_err(keyring_err)?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
@@ -260,8 +259,7 @@ fn load_project(project_id: &str) -> Result<Option<Project>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let content =
-        fs::read_to_string(&path).map_err(|e| format!("read project failed: {}", e))?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("read project failed: {}", e))?;
     let gc: GitConfig =
         serde_json::from_str(&content).map_err(|e| format!("parse project failed: {}", e))?;
     Ok(Some(Project {
@@ -400,8 +398,7 @@ fn read_git_config() -> Result<Option<GitConfig>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let content =
-        fs::read_to_string(&path).map_err(|e| format!("read config failed: {}", e))?;
+    let content = fs::read_to_string(&path).map_err(|e| format!("read config failed: {}", e))?;
     let config: GitConfig =
         serde_json::from_str(&content).map_err(|e| format!("parse config failed: {}", e))?;
     Ok(Some(config))
@@ -439,11 +436,7 @@ fn with_authenticated_url(url: &str, pat: &str) -> String {
     // the redactor cannot recover once the first `/` closes the authority.
     let without_scheme = ["https://", "http://"]
         .iter()
-        .find_map(|prefix| {
-            lowered
-                .strip_prefix(prefix)
-                .map(|_| &url[prefix.len()..])
-        })
+        .find_map(|prefix| lowered.strip_prefix(prefix).map(|_| &url[prefix.len()..]))
         .unwrap_or(url);
 
     let (host_with_userinfo, path) = match without_scheme.find('/') {
@@ -648,7 +641,7 @@ fn redact_credentials(text: &str) -> String {
         // The authority ends at the first delimiter, so `scheme://user@host/path`
         // is redacted even though the `@` sits before the slash.
         let end = after
-            .find(|c: char| matches!(c, '/' | '?' | '#' | ' ' | '\t' | '\n' | '\r' | '"' | '\''))
+            .find(['/', '?', '#', ' ', '\t', '\n', '\r', '"', '\''])
             .unwrap_or(after.len());
         let (authority, tail) = after.split_at(end);
         match (is_web, authority.rfind('@')) {
@@ -853,7 +846,7 @@ async fn run_git(
         CommandOutcome::Finished(Ok(output)) => output,
         CommandOutcome::Finished(Err(e)) => return Err(format!("git spawn failed: {}", e)),
         CommandOutcome::TimedOut => {
-            return Err(format!("git {} timed out after {}s", invoked, timeout_secs))
+            return Err(format!("git {} timed out after {}s", invoked, timeout_secs));
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -963,12 +956,11 @@ fn parse_existing_ids(dir: &Path) -> Vec<u64> {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Some(id) = extract_id_from_content(&content) {
-                if let Some(n) = id.strip_prefix("TKT-").and_then(|s| s.parse::<u64>().ok()) {
-                    ids.push(n);
-                }
-            }
+        if let Ok(content) = fs::read_to_string(&path)
+            && let Some(id) = extract_id_from_content(&content)
+            && let Some(n) = id.strip_prefix("TKT-").and_then(|s| s.parse::<u64>().ok())
+        {
+            ids.push(n);
         }
     }
     ids
@@ -1052,9 +1044,7 @@ fn parse_ticket_file(path: &Path) -> Result<Ticket, String> {
     let content = fs::read_to_string(path).map_err(|e| format!("read failed: {}", e))?;
     let parsed = Matter::<YAML>::new().parse(&content);
 
-    let data_pod = parsed
-        .data
-        .ok_or_else(|| "no frontmatter".to_string())?;
+    let data_pod = parsed.data.ok_or_else(|| "no frontmatter".to_string())?;
     let value: serde_json::Value = pod_to_json(data_pod);
     let map = value
         .as_object()
@@ -1171,8 +1161,8 @@ fn encode_ulid(bytes: &[u8; 16]) -> String {
 /// entropy.
 fn ulid_bytes(ms: u64, random: [u8; 10]) -> [u8; 16] {
     let mut bytes = [0u8; 16];
-    for i in 0..6 {
-        bytes[i] = ((ms >> (8 * (5 - i))) & 0xff) as u8;
+    for (i, byte) in bytes.iter_mut().enumerate().take(6) {
+        *byte = ((ms >> (8 * (5 - i))) & 0xff) as u8;
     }
     bytes[6..].copy_from_slice(&random);
     bytes
@@ -1270,9 +1260,7 @@ fn claims_to_be_a_ticket(name: &str, content: &str) -> bool {
             return false;
         }
         if let Some(value) = trimmed.strip_prefix("id:") {
-            let value = value
-                .trim_start()
-                .trim_start_matches(|c| c == '"' || c == '\'');
+            let value = value.trim_start().trim_start_matches(['"', '\'']);
             return value.starts_with("TKT-");
         }
     }
@@ -1325,7 +1313,11 @@ fn load_all_tickets(dir: &Path) -> Result<Vec<Ticket>, String> {
                     );
                 }
             }
-            Err(e) => eprintln!("[gitteam] skipping malformed ticket {}: {}", path.display(), e),
+            Err(e) => eprintln!(
+                "[gitteam] skipping malformed ticket {}: {}",
+                path.display(),
+                e
+            ),
         }
     }
     sort_tickets_desc(&mut tickets);
@@ -1458,10 +1450,10 @@ fn find_ticket_path_by_id(dir: &Path, id: &str) -> Result<PathBuf, String> {
         if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if extract_id_from_content(&content).as_deref() == Some(id) {
-                return Ok(path);
-            }
+        if let Ok(content) = fs::read_to_string(&path)
+            && extract_id_from_content(&content).as_deref() == Some(id)
+        {
+            return Ok(path);
         }
     }
     Err(format!("ticket not found: {}", id))
@@ -1543,7 +1535,10 @@ fn reconcile_ticket_ids_in(dir: &Path) -> Result<Vec<IdRename>, String> {
     let mut taken = list_taken_filenames(dir);
     let mut next = tickets
         .iter()
-        .filter_map(|t| t.id.strip_prefix("TKT-").and_then(|n| n.parse::<u64>().ok()))
+        .filter_map(|t| {
+            t.id.strip_prefix("TKT-")
+                .and_then(|n| n.parse::<u64>().ok())
+        })
         .max()
         .unwrap_or(999)
         + 1;
@@ -1637,8 +1632,7 @@ fn unlink_tickets(from: String, to: String) -> Result<Ticket, String> {
 /// otherwise render as phantom nodes), and each unordered pair is emitted
 /// exactly once, so `A → B` plus `B → A` collapses into a single edge.
 fn build_edges(tickets: &[Ticket]) -> Vec<GraphEdge> {
-    let known: std::collections::HashSet<&str> =
-        tickets.iter().map(|t| t.id.as_str()).collect();
+    let known: std::collections::HashSet<&str> = tickets.iter().map(|t| t.id.as_str()).collect();
 
     let mut edges: Vec<GraphEdge> = Vec::new();
     for t in tickets {
@@ -1652,7 +1646,10 @@ fn build_edges(tickets: &[Ticket]) -> Vec<GraphEdge> {
                 (link.clone(), t.id.clone())
             };
             if !edges.iter().any(|e| e.source == a && e.target == b) {
-                edges.push(GraphEdge { source: a, target: b });
+                edges.push(GraphEdge {
+                    source: a,
+                    target: b,
+                });
             }
         }
     }
@@ -1809,14 +1806,14 @@ async fn setup_repo_inner(
     // which carries no user identity — so it arrives with empty name/email.
     // Backfill from the config already saved for this project instead of
     // overwriting a good identity (and the saved config) with empty values.
-    if config.git_user_name.trim().is_empty() || config.git_user_email.trim().is_empty() {
-        if let Some(saved) = read_git_config()? {
-            if config.git_user_name.trim().is_empty() {
-                config.git_user_name = saved.git_user_name;
-            }
-            if config.git_user_email.trim().is_empty() {
-                config.git_user_email = saved.git_user_email;
-            }
+    if (config.git_user_name.trim().is_empty() || config.git_user_email.trim().is_empty())
+        && let Some(saved) = read_git_config()?
+    {
+        if config.git_user_name.trim().is_empty() {
+            config.git_user_name = saved.git_user_name;
+        }
+        if config.git_user_email.trim().is_empty() {
+            config.git_user_email = saved.git_user_email;
         }
     }
 
@@ -1847,7 +1844,7 @@ async fn setup_repo_inner(
         let mut cmd = build_git_cmd_anywhere();
         // Cloning through the credential override keeps the token out of the
         // clone's `.git/config`, where a credentialed url would be persisted.
-        cmd.args(&credentialed_remote_override(&config.repo_url, &pat));
+        cmd.args(credentialed_remote_override(&config.repo_url, &pat));
         cmd.arg("clone").arg(&clean_url).arg(&dir);
         // Cloning someone's real repository can legitimately take minutes: one
         // with a committed node_modules runs to tens of thousands of files. The
@@ -1904,7 +1901,7 @@ async fn setup_repo_inner(
 
         let mut cmd = Command::new("git");
         cmd.current_dir(&dir);
-        cmd.args(&["remote", "add", "origin", &clean_url]);
+        cmd.args(["remote", "add", "origin", &clean_url]);
         let status = timeout(Duration::from_secs(15), cmd.status())
             .await
             .map_err(|_| "git remote add timed out".to_string())?
@@ -1979,7 +1976,10 @@ async fn setup_repo_inner(
     // project is connected. Failing here is not fatal: without the driver the
     // same merge produces git's normal conflict, which the app can resolve.
     if let Err(e) = ensure_merge_driver(&dir).await {
-        eprintln!("[gitteam] could not configure the ticket merge driver: {}", e);
+        eprintln!(
+            "[gitteam] could not configure the ticket merge driver: {}",
+            e
+        );
     }
 
     save_pat(&pat)?;
@@ -2055,7 +2055,11 @@ pub fn merge_driver_main(args: &[String]) -> i32 {
         eprintln!("[gitteam] merge-driver expects three paths: <base> <ours> <theirs>");
         return 1;
     }
-    match merge_ticket_versions(Path::new(&args[0]), Path::new(&args[1]), Path::new(&args[2])) {
+    match merge_ticket_versions(
+        Path::new(&args[0]),
+        Path::new(&args[1]),
+        Path::new(&args[2]),
+    ) {
         Ok(()) => 0,
         Err(e) => {
             // stderr reaches the terminal of whoever ran the merge.
@@ -2072,13 +2076,13 @@ pub fn merge_driver_main(args: &[String]) -> i32 {
 /// the same filename created in two clones. That is a merge without history,
 /// not a failure.
 fn merge_ticket_versions(base: &Path, ours: &Path, theirs: &Path) -> Result<(), String> {
-    let base_text =
-        fs::read_to_string(base).map_err(|e| format!("could not read {}: {}", base.display(), e))?;
+    let base_text = fs::read_to_string(base)
+        .map_err(|e| format!("could not read {}: {}", base.display(), e))?;
 
     // A side we cannot parse is a side we must not merge: git's own conflict is
     // strictly better than a file we invented.
-    let ours_ticket =
-        parse_ticket_file(ours).map_err(|e| format!("could not parse {}: {}", ours.display(), e))?;
+    let ours_ticket = parse_ticket_file(ours)
+        .map_err(|e| format!("could not parse {}: {}", ours.display(), e))?;
     let theirs_ticket = parse_ticket_file(theirs)
         .map_err(|e| format!("could not parse {}: {}", theirs.display(), e))?;
     let base_ticket = if base_text.trim().is_empty() {
@@ -2305,7 +2309,9 @@ async fn ensure_merge_driver_with(repo: &Path, command: &str) -> Result<bool, St
         if !next.is_empty() && !next.ends_with('\n') {
             next.push('\n');
         }
-        next.push_str("# Written by GitTeam, never tracked: merge two versions of one ticket file.\n");
+        next.push_str(
+            "# Written by GitTeam, never tracked: merge two versions of one ticket file.\n",
+        );
         next.push_str(&rule);
         next.push('\n');
         atomic_write(&attributes, &next)?;
@@ -2336,7 +2342,10 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
     // linked it again. Failing is not fatal - the same merge just becomes a
     // normal conflict.
     if let Err(e) = ensure_merge_driver(&dir).await {
-        eprintln!("[gitteam] could not configure the ticket merge driver: {}", e);
+        eprintln!(
+            "[gitteam] could not configure the ticket merge driver: {}",
+            e
+        );
     }
 
     // Same reason as the driver above: a clone made by an older build stored the
@@ -2390,10 +2399,20 @@ async fn git_pull(config: GitConfig) -> Result<PullResult, String> {
     };
 
     let files_changed = if commits_pulled > 0 {
-        let files_output =
-            run_git(&dir, &["log", "-n", &commits_pulled.to_string(), "--name-only", "--format="], 10, None)
-                .await
-                .unwrap_or_default();
+        let files_output = run_git(
+            &dir,
+            &[
+                "log",
+                "-n",
+                &commits_pulled.to_string(),
+                "--name-only",
+                "--format=",
+            ],
+            10,
+            None,
+        )
+        .await
+        .unwrap_or_default();
         files_output
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -2432,11 +2451,16 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     // this app is allowed to do with a repository it does not own.
     let base = match &upstream_check {
         Ok(upstream) => upstream.trim().to_string(),
-        Err(_) => run_git(&dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"], 30, None)
-            .await
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
+        Err(_) => run_git(
+            &dir,
+            &["rev-parse", "--abbrev-ref", "origin/HEAD"],
+            30,
+            None,
+        )
+        .await
+        .unwrap_or_default()
+        .trim()
+        .to_string(),
     };
     if !base.is_empty() {
         let range = format!("{}...HEAD", base);
@@ -2461,9 +2485,9 @@ async fn git_push(config: GitConfig) -> Result<PushResult, String> {
     let mut cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
     let missing_credential = apply_credential(&mut cmd, active_remote_credential()?);
     if upstream_check.is_err() {
-        cmd.args(&["push", "-u", "origin", "HEAD"]);
+        cmd.args(["push", "-u", "origin", "HEAD"]);
     } else {
-        cmd.args(&["push", "origin", "HEAD"]);
+        cmd.args(["push", "origin", "HEAD"]);
     }
 
     let output = finished_or_timed_out(output_with_timeout(cmd, 300).await, "git push", 300)?;
@@ -2559,10 +2583,10 @@ async fn missing_tracked_files(dir: &Path) -> Result<Vec<String>, String> {
 async fn clear_blank_identity(dir: &Path) {
     for key in ["user.name", "user.email"] {
         let current = run_git(dir, &["config", "--local", "--get", key], 10, None).await;
-        if let Ok(value) = current {
-            if value.trim().is_empty() {
-                let _ = run_git(dir, &["config", "--local", "--unset", key], 10, None).await;
-            }
+        if let Ok(value) = current
+            && value.trim().is_empty()
+        {
+            let _ = run_git(dir, &["config", "--local", "--unset", key], 10, None).await;
         }
     }
 }
@@ -2598,7 +2622,7 @@ async fn git_commit_ticket(
     // Scope both the check and the commit to this ticket so unrelated staged
     // work stays exactly where it is instead of being swept into the commit.
     let mut diff_cmd = build_git_cmd(&dir);
-    diff_cmd.args(&["diff", "--cached", "--quiet", "--", &filename]);
+    diff_cmd.args(["diff", "--cached", "--quiet", "--", &filename]);
     let diff_status = timeout(Duration::from_secs(60), diff_cmd.status())
         .await
         .map_err(|_| "git diff --cached timed out".to_string())?
@@ -2638,20 +2662,21 @@ async fn git_commit_ticket(
     )
     .await;
 
-    let mut push_cmd =
-        build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
+    let mut push_cmd = build_git_cmd_with_user(&dir, &config.git_user_name, &config.git_user_email);
     let missing_credential = apply_credential(&mut push_cmd, active_remote_credential()?);
     if upstream_check.is_err() {
-        push_cmd.args(&["push", "-u", "origin", "HEAD"]);
+        push_cmd.args(["push", "-u", "origin", "HEAD"]);
     } else {
-        push_cmd.args(&["push", "origin", "HEAD"]);
+        push_cmd.args(["push", "origin", "HEAD"]);
     }
 
     let push_output =
         finished_or_timed_out(output_with_timeout(push_cmd, 60).await, "git push", 60)?;
 
     if !push_output.status.success() {
-        let stderr = String::from_utf8_lossy(&push_output.stderr).trim().to_string();
+        let stderr = String::from_utf8_lossy(&push_output.stderr)
+            .trim()
+            .to_string();
         let lower = stderr.to_lowercase();
         if lower.contains("non-fast-forward") || lower.contains("rejected") {
             return Err(format!("REJECTED: {}", stderr));
@@ -2775,7 +2800,10 @@ async fn git_read_conflict_version(filename: String, version: String) -> Result<
             Ok(content) => Ok(content),
             Err(_) => Ok(String::new()),
         },
-        other => Err(format!("unknown version '{}', expected 'local' or 'remote'", other)),
+        other => Err(format!(
+            "unknown version '{}', expected 'local' or 'remote'",
+            other
+        )),
     }
 }
 
@@ -2810,9 +2838,7 @@ async fn git_resolve_conflict(filename: String, resolution: String) -> Result<St
             //
             // Example: `TKT-0001-foo.md` → `TKT-0001-foo.remote.md`,
             //          next collision       → `TKT-0001-foo.remote-2.md`
-            let stem = filename
-                .strip_suffix(".md")
-                .unwrap_or(filename.as_str());
+            let stem = filename.strip_suffix(".md").unwrap_or(filename.as_str());
             let remote_filename = {
                 let mut candidate = format!("{}.remote.md", stem);
                 let mut i = 2;
@@ -2824,13 +2850,8 @@ async fn git_resolve_conflict(filename: String, resolution: String) -> Result<St
             };
 
             // Capture HEAD's version of the conflicted file
-            let remote_content = run_git(
-                &dir,
-                &["show", &format!("HEAD:{}", filename)],
-                10,
-                None,
-            )
-            .await?;
+            let remote_content =
+                run_git(&dir, &["show", &format!("HEAD:{}", filename)], 10, None).await?;
             let remote_path = dir.join(&remote_filename);
             fs::write(&remote_path, &remote_content)
                 .map_err(|e| format!("write remote copy failed: {}", e))?;
@@ -2930,10 +2951,7 @@ struct RemoteChangedPayload {
 }
 
 #[tauri::command]
-async fn git_start_watcher(
-    app: AppHandle,
-    state: State<'_, WatcherState>,
-) -> Result<(), String> {
+async fn git_start_watcher(app: AppHandle, state: State<'_, WatcherState>) -> Result<(), String> {
     {
         let task_guard = state
             .task
@@ -3074,9 +3092,7 @@ async fn git_stop_watcher(state: State<'_, WatcherState>) -> Result<(), String> 
 }
 
 #[tauri::command]
-async fn git_current_remote_sha(
-    state: State<'_, WatcherState>,
-) -> Result<Option<String>, String> {
+async fn git_current_remote_sha(state: State<'_, WatcherState>) -> Result<Option<String>, String> {
     let guard = state
         .last_known_sha
         .lock()
@@ -3411,7 +3427,12 @@ async fn board_create(input: BoardCreateInput) -> Result<Project, String> {
     let (user_name, user_email) =
         choose_git_identity(input.user_name, input.user_email, config.as_ref())?;
 
-    let base = match input.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+    let base = match input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
         Some(raw) => sanitize_board_name(raw),
         None => default_board_name(
             config
@@ -3510,9 +3531,9 @@ fn percent_decode(input: &str) -> Result<String, String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = bytes
-                .get(i + 1..i + 3)
-                .ok_or_else(|| "The invitation link ends in the middle of an escape.".to_string())?;
+            let hex = bytes.get(i + 1..i + 3).ok_or_else(|| {
+                "The invitation link ends in the middle of an escape.".to_string()
+            })?;
             let value = std::str::from_utf8(hex)
                 .ok()
                 .and_then(|hex| u8::from_str_radix(hex, 16).ok())
@@ -3821,7 +3842,11 @@ fn collaborator_error_message(
                 "GitHub refused to give @{} access to this board. {} (Scopes it has: {}.)",
                 username,
                 need,
-                if scopes.is_empty() { "none reported" } else { scopes }
+                if scopes.is_empty() {
+                    "none reported"
+                } else {
+                    scopes
+                }
             )
         }
         _ => github_api_error(status, oauth_scopes, body),
@@ -4031,8 +4056,8 @@ fn remove_project(project_id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn switch_project(project_id: String) -> Result<Project, String> {
-    let project = load_project(&project_id)?
-        .ok_or_else(|| format!("project '{}' not found", project_id))?;
+    let project =
+        load_project(&project_id)?.ok_or_else(|| format!("project '{}' not found", project_id))?;
     write_active_id(&project_id)?;
     Ok(project)
 }
@@ -4199,7 +4224,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         git_in(&dir, &["init", "-q"]);
         git_in(&dir, &["config", "--local", "user.name", "Real Name"]);
-        git_in(&dir, &["config", "--local", "user.email", "real@example.com"]);
+        git_in(
+            &dir,
+            &["config", "--local", "user.email", "real@example.com"],
+        );
 
         clear_blank_identity(&dir).await;
         assert_eq!(
@@ -4214,8 +4242,16 @@ mod tests {
         git_in(&dir, &["config", "--local", "user.name", ""]);
         git_in(&dir, &["config", "--local", "user.email", "   "]);
         clear_blank_identity(&dir).await;
-        assert!(!git_out(&dir, &["config", "--local", "--get", "user.name"]).status.success());
-        assert!(!git_out(&dir, &["config", "--local", "--get", "user.email"]).status.success());
+        assert!(
+            !git_out(&dir, &["config", "--local", "--get", "user.name"])
+                .status
+                .success()
+        );
+        assert!(
+            !git_out(&dir, &["config", "--local", "--get", "user.email"])
+                .status
+                .success()
+        );
         // Absent keys must not panic either.
         clear_blank_identity(&dir).await;
         let _ = fs::remove_dir_all(&dir);
@@ -4228,7 +4264,10 @@ mod tests {
         fs::write(&path, render_frontmatter(&original)).unwrap();
 
         let parsed = parse_ticket_file(&path).unwrap();
-        assert_eq!(parsed.links, vec!["TKT-1039".to_string(), "TKT-1000".to_string()]);
+        assert_eq!(
+            parsed.links,
+            vec!["TKT-1039".to_string(), "TKT-1000".to_string()]
+        );
         assert_eq!(parsed.id, "TKT-1041");
         assert_eq!(parsed.tags, vec!["ui".to_string()]);
         // `Matter::parse` trims the trailing newline from the body.
@@ -4314,7 +4353,11 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let tickets = load_all_tickets(&dir).unwrap();
         let mut ids: Vec<&str> = tickets.iter().map(|t| t.id.as_str()).collect();
         ids.sort();
-        assert_eq!(ids, vec!["TKT-1001", "TKT-1041"], "a renamed ticket must not vanish");
+        assert_eq!(
+            ids,
+            vec!["TKT-1001", "TKT-1041"],
+            "a renamed ticket must not vanish"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -4480,7 +4523,9 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     #[test]
     fn owned_ticket_paths_accept_ticket_files_at_the_root() {
         assert!(is_owned_ticket_path("TKT-1000-prueba-i.md"));
-        assert!(is_owned_ticket_path("TKT-1042-update-csv-parser-for-utf-16.md"));
+        assert!(is_owned_ticket_path(
+            "TKT-1042-update-csv-parser-for-utf-16.md"
+        ));
         assert!(is_owned_ticket_path("TKT-1.md"));
     }
 
@@ -4575,9 +4620,7 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         // bytes-to-characters mapping, the part of the format that can never
         // change afterwards without renumbering every uid in existence.
         let ms: u64 = 0x0198_f2c1_7000;
-        let random = [
-            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x23, 0x45, 0x67,
-        ];
+        let random = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x23, 0x45, 0x67];
         assert_eq!(
             encode_ulid(&ulid_bytes(0, [0x00; 10])),
             "00000000000000000000000000"
@@ -4586,7 +4629,10 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             encode_ulid(&ulid_bytes(0xffff_ffff_ffff, [0xff; 10])),
             "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"
         );
-        assert_eq!(encode_ulid(&ulid_bytes(ms, random)), "01K3SC2W00NAXWSQFEZW0J6HB7");
+        assert_eq!(
+            encode_ulid(&ulid_bytes(ms, random)),
+            "01K3SC2W00NAXWSQFEZW0J6HB7"
+        );
 
         // The timestamp is big-endian in the leading six bytes, so a wrong byte
         // order would still sort correctly among ourselves while making every
@@ -4698,8 +4744,22 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let older = "01J8QK9W3M0000000000000000";
         let newer = "01J8QK9W3MZZZZZZZZZZZZZZZZ";
         // Two people created TKT-1042 offline. The older one keeps the number.
-        write_identity_ticket(&dir, "TKT-1042-first.md", "TKT-1042", Some(older), "First", &[]);
-        write_identity_ticket(&dir, "TKT-1042-second.md", "TKT-1042", Some(newer), "Second", &[]);
+        write_identity_ticket(
+            &dir,
+            "TKT-1042-first.md",
+            "TKT-1042",
+            Some(older),
+            "First",
+            &[],
+        );
+        write_identity_ticket(
+            &dir,
+            "TKT-1042-second.md",
+            "TKT-1042",
+            Some(newer),
+            "Second",
+            &[],
+        );
         // A third points at the contested id; a fourth is uninvolved.
         write_identity_ticket(
             &dir,
@@ -4828,7 +4888,15 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         git_in(&root, &["init", "--bare", "-q", remote.to_str().unwrap()]);
 
         let seed = root.join("seed");
-        git_in(&root, &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()]);
+        git_in(
+            &root,
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
         fs::write(seed.join("README.md"), "board\n").unwrap();
         git_in(&seed, &["add", "README.md"]);
         git_in(&seed, &["commit", "-q", "-m", "init"]);
@@ -4837,7 +4905,15 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let alice = root.join("alice");
         let bob = root.join("bob");
         for who in [&alice, &bob] {
-            git_in(&root, &["clone", "-q", remote.to_str().unwrap(), who.to_str().unwrap()]);
+            git_in(
+                &root,
+                &[
+                    "clone",
+                    "-q",
+                    remote.to_str().unwrap(),
+                    who.to_str().unwrap(),
+                ],
+            );
         }
 
         // Alice goes first so her uid is the older one.
@@ -4850,7 +4926,10 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         // Bob was working offline: same id, different ticket, and his own
         // second ticket already points at it.
         let bob_ticket = create_ticket_in(&bob, create_input("Bob's ticket")).unwrap();
-        assert_eq!(bob_ticket.id, "TKT-1000", "the collision must be reproduced");
+        assert_eq!(
+            bob_ticket.id, "TKT-1000",
+            "the collision must be reproduced"
+        );
         let bob_second = create_ticket_in(&bob, create_input("Bob's follow-up")).unwrap();
         assert_eq!(bob_second.id, "TKT-1001");
         link_in_dir(&bob, "TKT-1001", "TKT-1000").unwrap();
@@ -4879,8 +4958,12 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             .find(|t| t.uid == bob_ticket.uid)
             .map(|t| t.id.clone())
             .unwrap();
-        assert_eq!(bob_dir_id, "TKT-1002", "Bob's ticket was the one renumbered");
-        let referrer = parse_ticket_file(&find_ticket_path_by_id(&bob, "TKT-1001").unwrap()).unwrap();
+        assert_eq!(
+            bob_dir_id, "TKT-1002",
+            "Bob's ticket was the one renumbered"
+        );
+        let referrer =
+            parse_ticket_file(&find_ticket_path_by_id(&bob, "TKT-1001").unwrap()).unwrap();
         assert_eq!(
             referrer.links,
             vec!["TKT-1002".to_string()],
@@ -4906,7 +4989,10 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             "exactly one ticket owns TKT-1000 once both clones converged"
         );
         // Alice's ticket is untouched and still hers.
-        let alice_now = alice_view.iter().find(|t| t.uid == alice_ticket.uid).unwrap();
+        let alice_now = alice_view
+            .iter()
+            .find(|t| t.uid == alice_ticket.uid)
+            .unwrap();
         assert_eq!(alice_now.id, "TKT-1000");
         assert_eq!(alice_now.filepath, alice_ticket.filepath);
 
@@ -5283,10 +5369,7 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         );
 
         let configured = git_out(&dir, &["config", "--get", "merge.gitteam-ticket.driver"]);
-        assert_eq!(
-            String::from_utf8_lossy(&configured.stdout).trim(),
-            command
-        );
+        assert_eq!(String::from_utf8_lossy(&configured.stdout).trim(), command);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -5314,11 +5397,10 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         // Only once the commit exists: on an unborn HEAD `rev-parse
         // --abbrev-ref` answers "HEAD" instead of a branch name, and checking
         // that out would silently stay where we already were.
-        let branch = String::from_utf8_lossy(
-            &git_out(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let branch =
+            String::from_utf8_lossy(&git_out(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout)
+                .trim()
+                .to_string();
 
         // A stand-in driver: a test must never point git at the test binary,
         // which would re-run the whole suite from inside a merge.
@@ -5464,7 +5546,12 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let seed = root.join("seed");
         git_in(
             &root,
-            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
         );
         fs::write(seed.join("README.md"), "board\n").unwrap();
         git_in(&seed, &["add", "README.md"]);
@@ -5473,7 +5560,10 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
 
         let clean = "https://github.com/astivens/board.git";
         for (name, redirect) in [
-            ("path", format!("url.{}.insteadOf={}", remote.display(), clean)),
+            (
+                "path",
+                format!("url.{}.insteadOf={}", remote.display(), clean),
+            ),
             (
                 "userinfo",
                 format!("url.file://x:tok@{}.insteadOf={}", remote.display(), clean),
@@ -5576,11 +5666,7 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             "the arguments are still reported, redacted: {}",
             err
         );
-        assert!(
-            err.contains("fatal:"),
-            "and so is what git said: {}",
-            err
-        );
+        assert!(err.contains("fatal:"), "and so is what git said: {}", err);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5648,7 +5734,8 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     // came out double-wrapped and the token sat behind the `/` that closes the
     // authority the redactor scans. It is normalised before the token goes in.
     fn a_url_pasted_with_an_uppercase_scheme_is_not_double_wrapped() {
-        let authenticated = with_authenticated_url("HTTPS://github.com/astivens/board.git", "ghp_s");
+        let authenticated =
+            with_authenticated_url("HTTPS://github.com/astivens/board.git", "ghp_s");
         assert_eq!(
             authenticated, "https://x-access-token:ghp_s@github.com/astivens/board.git",
             "one scheme, and the host is the one that was pasted"
@@ -5708,7 +5795,11 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             fs::create_dir_all(&dir).unwrap();
             git_in(&dir, &["init", "-q"]);
             git_in(&dir, &["remote", "add", "origin", url]);
-            assert!(!strip_stored_userinfo(&dir), "{} must not be rewritten", url);
+            assert!(
+                !strip_stored_userinfo(&dir),
+                "{} must not be rewritten",
+                url
+            );
             let after = git_out(&dir, &["remote", "get-url", "origin"]);
             assert_eq!(String::from_utf8_lossy(&after.stdout).trim(), url);
             let _ = fs::remove_dir_all(&dir);
@@ -5761,7 +5852,12 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let seed = root.join("seed");
         git_in(
             &root,
-            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
         );
         fs::write(seed.join("README.md"), "board\n").unwrap();
         git_in(&seed, &["add", "README.md"]);
@@ -5773,7 +5869,14 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         let work = root.join("work");
         git_in(
             &root,
-            &["-c", &redirect, "clone", "-q", clean, work.to_str().unwrap()],
+            &[
+                "-c",
+                &redirect,
+                "clone",
+                "-q",
+                clean,
+                work.to_str().unwrap(),
+            ],
         );
         git_in(&work, &["-c", &redirect, "fetch", "-q", "origin"]);
         fs::write(work.join("TKT-1000-a.md"), "---\nid: TKT-1000\n---\n\nx\n").unwrap();
@@ -5827,7 +5930,10 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             422,
             r#"{"message":"Repository creation failed.","errors":[{"message":"name already exists on this account"}]}"#
         ));
-        assert!(!github_name_taken(422, r#"{"message":"Validation Failed"}"#));
+        assert!(!github_name_taken(
+            422,
+            r#"{"message":"Validation Failed"}"#
+        ));
         assert!(!github_name_taken(
             403,
             r#"{"message":"name already exists on this account"}"#
@@ -5946,9 +6052,19 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     #[test]
     fn the_repo_scope_is_an_exact_list_member() {
         // A scope that merely contains "repo" is not the scope.
-        for value in ["repo", "repo,workflow", "workflow, repo ", "public_repo,repo"] {
+        for value in [
+            "repo",
+            "repo,workflow",
+            "workflow, repo ",
+            "public_repo,repo",
+        ] {
             let message = github_api_error(403, Some(value), "{}");
-            assert!(message.contains("permissions"), "{:?} -> {}", value, message);
+            assert!(
+                message.contains("permissions"),
+                "{:?} -> {}",
+                value,
+                message
+            );
         }
         for value in ["repo_deployment", "public_repo", "repo:status"] {
             let message = github_api_error(403, Some(value), "{}");
@@ -5987,10 +6103,9 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     fn a_pasted_link_tolerates_whitespace_and_missing_labels() {
         // The same string is copied as text, so it arrives with whatever the
         // messenger added around it, and an older link may carry no labels.
-        let parsed = parse_invite_link(
-            "  gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git  ",
-        )
-        .expect("a link carrying only a repository must parse");
+        let parsed =
+            parse_invite_link("  gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git  ")
+                .expect("a link carrying only a repository must parse");
         assert_eq!(parsed.repo_url, "https://github.com/a/b.git");
         assert_eq!(parsed.board, None);
         assert_eq!(parsed.from, None);
@@ -6107,8 +6222,7 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
 
     #[test]
     fn a_received_link_is_an_invitation_when_it_reads_as_one() {
-        let url =
-            "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=b&from=Ana";
+        let url = "gitteam://join?repo=https%3A%2F%2Fgithub.com%2Fa%2Fb.git&board=b&from=Ana";
         let intake = classify_received_links(&[url.to_string()]);
         assert_eq!(intake.invite.as_deref(), Some(url));
         assert_eq!(intake.not_an_invitation, None);
@@ -6224,23 +6338,8 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         );
 
         for bad in [
-            "",
-            "   ",
-            "@",
-            "@@",
-            "ana dev",
-            "-ana",
-            "ana-",
-            "ana--dev",
-            "a--b",
-            "ana/dev",
-            "ana#dev",
-            "ana_dev",
-            "ana.",
-            "ana,",
-            "ana@dev",
-            "@ana@dev",
-            "áná",
+            "", "   ", "@", "@@", "ana dev", "-ana", "ana-", "ana--dev", "a--b", "ana/dev",
+            "ana#dev", "ana_dev", "ana.", "ana,", "ana@dev", "@ana@dev", "áná",
         ] {
             let error = normalize_github_username(bad).expect_err("must be rejected");
             assert!(!error.trim().is_empty(), "{:?} produced no reason", bad);
@@ -6280,8 +6379,14 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
 
         // Otorgar acceso por usuario es una operación de GitHub: en otro host no
         // hay nada que preguntar, y decirlo acá es mejor que fallar más tarde.
-        assert_eq!(repo_full_name("https://gitlab.com/astivens/board.git"), None);
-        assert_eq!(repo_full_name("https://github.com.other/astivens/board"), None);
+        assert_eq!(
+            repo_full_name("https://gitlab.com/astivens/board.git"),
+            None
+        );
+        assert_eq!(
+            repo_full_name("https://github.com.other/astivens/board"),
+            None
+        );
         // El host se lee después del último `@`: si no, una url se hace pasar
         // por GitHub.
         assert_eq!(
@@ -6437,9 +6542,11 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
 
     #[test]
     fn an_empty_or_unreadable_list_of_invitations_is_handled() {
-        assert!(pending_invitations_from_json("[]")
-            .expect("an empty list is not a failure")
-            .is_empty());
+        assert!(
+            pending_invitations_from_json("[]")
+                .expect("an empty list is not a failure")
+                .is_empty()
+        );
         assert!(pending_invitations_from_json("not json").is_err());
         assert!(pending_invitations_from_json("{}").is_err());
 
@@ -6511,7 +6618,8 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
     #[test]
     fn every_git_command_forbids_an_interactive_prompt() {
         fn env_of(cmd: &Command) -> Vec<(String, Option<String>)> {
-            cmd.as_std().get_envs()
+            cmd.as_std()
+                .get_envs()
                 .map(|(key, value)| {
                     (
                         key.to_string_lossy().into_owned(),
@@ -6522,8 +6630,11 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
         }
 
         let plain = env_of(&build_git_cmd(Path::new(".")));
-        let with_user =
-            env_of(&build_git_cmd_with_user(Path::new("."), "A Name", "a@example.com"));
+        let with_user = env_of(&build_git_cmd_with_user(
+            Path::new("."),
+            "A Name",
+            "a@example.com",
+        ));
         // The constructor the three new call sites use: the connection test,
         // the clone and the watcher all lost their direct `Command::new("git")`
         // and would silently lose the guard with it.
@@ -6621,7 +6732,10 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
                 url
             );
         }
-        assert!(!asked, "a credential-free remote must not reach the keyring");
+        assert!(
+            !asked,
+            "a credential-free remote must not reach the keyring"
+        );
         let reason = match credential_for_remote("https://github.com/owner/repo.git", || {
             Err("No saved credentials. Please set up the repository again.".to_string())
         }) {
@@ -6664,5 +6778,4 @@ assignee: null\npriority: \"low\"\ntags: [\"api\"]\nlast_updated: \"2025-01-01T0
             Some(reason)
         );
     }
-
 }

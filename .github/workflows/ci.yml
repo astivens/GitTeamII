@@ -48,3 +48,9 @@ jobs:
       - name: Test
         working-directory: src-tauri
         run: cargo test --locked
+      - name: Format
+        working-directory: src-tauri
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
