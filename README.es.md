@@ -4,6 +4,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-7c5cff)](#generar-un-distribuible)
+[![CI](https://github.com/astivens/GitTeamII/actions/workflows/ci.yml/badge.svg)](https://github.com/astivens/GitTeamII/actions/workflows/ci.yml)
 
 [English](README.md) · **Español**
 
@@ -218,10 +219,12 @@ Cada objetivo debe compilarse en su propia plataforma.
 pnpm tauri dev              # aplicación de escritorio con recarga en caliente
 pnpm exec tsc --noEmit      # comprobación de tipos
 pnpm build                  # comprobación de tipos + build de producción del frontend
-cd src-tauri && cargo test  # 97 tests unitarios + 2 de integración
+cd src-tauri && cargo test  # 105 tests unitarios + 2 de integración
 ```
 
-La suite de Rust cubre el ida y vuelta del frontmatter, el manejo de enlaces, las aristas del grafo, el driver de merge y el manejo de credenciales. Todavía no hay un runner de tests para el frontend; el frontend se verifica con `tsc` y un build de producción.
+La suite de Rust cubre el ida y vuelta del frontmatter, el manejo de enlaces, las aristas del grafo, el driver de merge y el manejo de credenciales. El frontend se verifica con `tsc` y un build de producción.
+
+Cada push y cada pull request corren las mismas comprobaciones en CI: la comprobación de tipos y el build del frontend, y la suite de tests de Rust.
 
 ## Estructura del proyecto
 
