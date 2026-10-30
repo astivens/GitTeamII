@@ -19,15 +19,40 @@ import type { TicketStatus } from "../../types/ticket";
 // transformed, so these are "virtual" coordinates the sim works in.
 const VIRTUAL_W = 1000;
 const VIRTUAL_H = 700;
-const REPULSION = 6000;
 const SPRING_K = 0.02;
 const SPRING_LEN = 110;
-const CENTER_K = 0.004;
-const RING_K = 0.02;
-const RING_RADIUS = 320;
+const CENTER_K = 0.006;
+const RING_K = 0.08;
+const RING_RADIUS = 260;
+const RING_MAX_PULL = 4;
 const DAMPING = 0.85;
 const MAX_TICKS = 600;
-const MIN_ENERGY = 0.05;
+/**
+ * The layout counts as finished when no node moved more than this many
+ * pixels in a tick. A velocity threshold cannot be used here: the separation
+ * pass moves nodes without touching their velocity, so a settled layout can
+ * still carry a non-zero velocity.
+ */
+const SETTLE_MOVE = 0.3;
+/**
+ * The soft-core radius of the repulsion law, and the minimum distance two
+ * nodes are allowed to sit at. They are the same value on purpose: the
+ * repulsion peaks at this distance, and the separation pass guarantees it.
+ */
+const REPULSION_R0 = 70;
+const MIN_SEPARATION = 30;
+/**
+ * Repulsion strength. The force law is
+ *   f(d) = REPULSION * d^2 / (d^2 + R0^2)^2
+ * which is zero at d=0 and peaks at d=R0, so a close pair is held at a
+ * readable distance instead of being flung across the canvas.
+ *
+ * The constant scales with the node count so the cloud keeps a stable size as
+ * the board grows: with N nodes in a disc of radius R the equilibrium is
+ *   REPULSION ≈ CENTER_K * R^3 / N^2
+ * The value below is that formula for N=41, R=260.
+ */
+const REPULSION = 900;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
 
@@ -78,27 +103,38 @@ function createNodes(
   });
 }
 
-/** Advance the simulation one step. Returns the total kinetic energy. */
+/**
+ * A direction for a pair of nodes that sit on top of each other.
+ *
+ * The direction must never be the zero vector, or the pair is never pushed
+ * apart at all. It is derived from the pair's indices, so it is stable across
+ * runs: the same two nodes always separate the same way.
+ */
+function pairAngle(i: number, j: number): number {
+  const h = ((i * 73856093) ^ (j * 19349663)) >>> 0;
+  return (h / 4294967296) * Math.PI * 2;
+}
+
+/** Advance the simulation one step. */
 function step(
   nodes: SimNode[],
   edges: GraphEdge[],
   byId: Map<string, SimNode>,
-): number {
+): void {
+  // Repulsion. The soft-core law never blows up: the force is zero when two
+  // nodes coincide and peaks at REPULSION_R0, so the layout converges instead
+  // of exploding.
+  const r02 = REPULSION_R0 * REPULSION_R0;
   for (let i = 0; i < nodes.length; i += 1) {
     for (let j = i + 1; j < nodes.length; j += 1) {
       const a = nodes[i];
       const b = nodes[j];
-      let dx = b.x - a.x;
-      let dy = b.y - a.y;
-      let d2 = dx * dx + dy * dy;
-      if (d2 < 1) {
-        // Perfectly overlapping nodes would divide by zero; nudge them apart.
-        dx = (i % 3) - 1;
-        dy = (j % 3) - 1;
-        d2 = 1;
-      }
-      const d = Math.sqrt(d2);
-      const f = REPULSION / d2;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const d2 = d * d;
+      const denom = d2 + r02;
+      const f = (REPULSION * d2) / (denom * denom);
       const fx = (dx / d) * f;
       const fy = (dy / d) * f;
       a.vx -= fx;
@@ -127,19 +163,28 @@ function step(
   const cx = VIRTUAL_W / 2;
   const cy = VIRTUAL_H / 2;
   for (const n of nodes) {
-    n.vx += (cx - n.x) * CENTER_K;
-    n.vy += (cy - n.y) * CENTER_K;
+    const dx = n.x - cx;
+    const dy = n.y - cy;
+    const d = Math.hypot(dx, dy) || 1;
+
     if (n.degree === 0) {
-      const dx = n.x - cx;
-      const dy = n.y - cy;
-      const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const push = (d - RING_RADIUS) * RING_K;
-      n.vx += (dx / d) * push;
-      n.vy += (dy / d) * push;
+      // Unlinked nodes are kept on an outer ring. The force is a HOOK: it
+      // only acts once a node strays past the ring, pulling it back in. A
+      // spring toward the radius would have no force at the radius itself and
+      // could never hold a node there — it would collapse into the centre.
+      // What pushes orphans out to the ring is their mutual repulsion.
+      if (d > RING_RADIUS) {
+        const pull = Math.min(RING_MAX_PULL, (d - RING_RADIUS) * RING_K);
+        n.vx -= (dx / d) * pull;
+        n.vy -= (dy / d) * pull;
+      }
+    } else {
+      // Linked nodes are pulled toward the centre.
+      n.vx += (cx - n.x) * CENTER_K;
+      n.vy += (cy - n.y) * CENTER_K;
     }
   }
 
-  let energy = 0;
   for (const n of nodes) {
     if (n.pinned) {
       n.vx = 0;
@@ -150,9 +195,35 @@ function step(
     n.vy *= DAMPING;
     n.x += n.vx;
     n.y += n.vy;
-    energy += n.vx * n.vx + n.vy * n.vy;
   }
-  return energy;
+
+  // Separation pass. It runs LAST, after the integration, so nothing can
+  // undo it: every pair ends the tick at least MIN_SEPARATION apart. Doing it
+  // before the integration lets the forces pull the nodes back together.
+  for (let i = 0; i < nodes.length; i += 1) {
+    for (let j = i + 1; j < nodes.length; j += 1) {
+      const a = nodes[i];
+      const b = nodes[j];
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      let d = Math.hypot(dx, dy);
+      if (d >= MIN_SEPARATION) continue;
+      if (d < 1e-6) {
+        // Exactly on top of each other: pick a direction that is never zero.
+        const angle = pairAngle(i, j);
+        dx = Math.cos(angle);
+        dy = Math.sin(angle);
+        d = 1;
+      }
+      const ux = dx / d;
+      const uy = dy / d;
+      const push = (MIN_SEPARATION - d) / 2;
+      a.x -= ux * push;
+      a.y -= uy * push;
+      b.x += ux * push;
+      b.y += uy * push;
+    }
+  }
 }
 
 interface GraphViewProps {
@@ -194,10 +265,21 @@ export function GraphView({ onOpenTicket }: GraphViewProps) {
         return;
       }
       const byId = new Map(nodes.map((n) => [n.id, n]));
-      const energy = step(nodes, edgesRef.current, byId);
+
+      // The settle test is about how far the layout MOVED, not about
+      // velocity: the separation pass moves nodes without changing their
+      // velocity, so a settled layout can still carry a non-zero velocity.
+      const before = nodes.map((n) => ({ x: n.x, y: n.y }));
+      step(nodes, edgesRef.current, byId);
+      let moved = 0;
+      for (let i = 0; i < nodes.length; i += 1) {
+        const d = Math.hypot(nodes[i].x - before[i].x, nodes[i].y - before[i].y);
+        if (d > moved) moved = d;
+      }
+
       ticks += 1;
       setFrame((f) => f + 1);
-      const settled = ticks > MAX_TICKS || energy / nodes.length < MIN_ENERGY;
+      const settled = ticks > MAX_TICKS || moved < SETTLE_MOVE;
       if (!draggingRef.current && settled) {
         runningRef.current = false;
         rafRef.current = null;
