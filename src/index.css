@@ -446,7 +446,7 @@ body {
 .items-start { align-items: flex-start; }
 .justify-between { justify-content: space-between; }
 .justify-center { justify-content: center; }
-.flex-1 { flex: 1; min-width: 0; }
+.flex-1 { flex: 1; min-width: 0; min-height: 0; }
 .shrink-0 { flex-shrink: 0; }
 
 .gap-1 { gap: var(--space-1); }
@@ -458,8 +458,14 @@ body {
 .w-full { width: 100%; }
 .h-full { height: 100%; }
 .min-w-0 { min-width: 0; }
+/* A flex item defaults to `min-height: auto`, so it refuses to shrink below
+   its content and the scroll container never scrolls. `min-h-0` is what lets
+   a column inside a fixed-height board scroll instead of growing. */
+.min-h-0 { min-height: 0; }
 .overflow-hidden { overflow: hidden; }
 .overflow-auto { overflow: auto; }
+.overflow-x-auto { overflow-x: auto; overflow-y: hidden; }
+.overflow-y-auto { overflow-y: auto; overflow-x: hidden; }
 .relative { position: relative; }
 .absolute { position: absolute; }
 .cursor-grab { cursor: grab; }
